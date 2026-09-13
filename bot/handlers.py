@@ -1,5 +1,6 @@
 """Telegram update handlers."""
 
+import base64
 import logging
 import os
 from openai import AsyncOpenAI
