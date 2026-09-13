@@ -134,7 +134,7 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = await openai_client.responses.create(
-            model="openrouter/free",
+            model="nvidia/nemotron-3-ultra-550b-a55b:free",
             input=message.text,
         )
 
