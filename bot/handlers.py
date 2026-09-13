@@ -1,6 +1,8 @@
 """Telegram update handlers."""
 
 import logging
+import os
+from openai import AsyncOpenAI
 
 from telegram import ReplyKeyboardMarkup, Update
 from telegram.error import Conflict, NetworkError, TimedOut
@@ -10,6 +12,8 @@ from bot import cache, db
 
 
 logger = logging.getLogger(__name__)
+
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Keys used to read shared connections from Application.bot_data.
 DB_KEY = "db"
