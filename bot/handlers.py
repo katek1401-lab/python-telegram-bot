@@ -236,4 +236,5 @@ def register_handlers(application: Application) -> None:
     application.add_handler(
         MessageHandler(filters.Regex(f"^({MENU_HELP}|{MENU_ABOUT}|{MENU_PING})$"), menu_button)
     )
+    application.add_handler(MessageHandler(filters.PHOTO, photo_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
