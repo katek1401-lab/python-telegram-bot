@@ -123,20 +123,25 @@ async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await ping(update, context)
 
 
-async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
-    user = update.effective_user
-    if message is None or not message.text or user is None:
+
+    if message is None or not message.text:
         return
 
-    # Track how many messages each user has sent using a Redis counter, falling
-    # back to an in-memory counter when Redis is unavailable.
-    client = context.bot_data.get(REDIS_KEY)
-    if client is not None:
-        count = await cache.increment_message_count(client, user.id)
-    else:
-        count = _LOCAL_MESSAGE_COUNTS[user.id] = _LOCAL_MESSAGE_COUNTS.get(user.id, 0) + 1
-    await message.reply_text(f"You sent (#{count}):\n{message.text}")
+    try:
+        response = await openai_client.responses.create(
+            model="gpt-5.6",
+            input=message.text,
+        )
+
+        await message.reply_text(response.output_text)
+
+    except Exception:
+        logger.exception("OpenAI request failed")
+        await message.reply_text(
+            "Не удалось получить ответ от ИИ. Попробуй ещё раз."
+        )
 
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
