@@ -13,7 +13,10 @@ from bot import cache, db
 
 logger = logging.getLogger(__name__)
 
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_client = AsyncOpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1",
+)
 
 # Keys used to read shared connections from Application.bot_data.
 DB_KEY = "db"
@@ -131,7 +134,7 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = await openai_client.responses.create(
-            model="gpt-5.6",
+            model="openrouter/free",
             input=message.text,
         )
 
