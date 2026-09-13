@@ -154,7 +154,48 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Не удалось получить ответ от ИИ. Попробуй ещё раз."
         )
 
+async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
 
+    if message is None or not message.photo:
+        return
+
+    try:
+        photo = message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await file.download_as_bytearray()
+
+        image_b64 = base64.b64encode(photo_bytes).decode("utf-8")
+
+        response = await openai_client.responses.create(
+            model="openrouter/free",
+            instructions=(
+                "Ты — VK AI Manager. Отвечай по-русски. "
+                "Проанализируй фотографию для публикации во ВКонтакте. "
+                "Опиши, что на ней, оцени её для поста и предложи идею текста."
+            ),
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Проанализируй эту фотографию для поста ВКонтакте."
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/jpeg;base64,{image_b64}"
+                        }
+                    ]
+                }
+            ],
+        )
+
+        await message.reply_text(response.output_text)
+
+    except Exception:
+        logger.exception("Photo AI request failed")
+        await message.reply_text("Не удалось проанализировать фото.")
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     message = update.effective_message
