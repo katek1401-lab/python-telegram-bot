@@ -134,9 +134,16 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = await openai_client.responses.create(
-            model="nvidia/nemotron-3-ultra-550b-a55b:free",
-            input=message.text,
-        )
+    model="nvidia/nemotron-3-ultra-550b-a55b:free",
+    instructions=(
+        "Ты — VK AI Manager. "
+        "Отвечай по-русски. "
+        "Помогай создавать посты для ВКонтакте: тексты, заголовки, призывы к действию, хэштеги и идеи контента. "
+        "Пиши понятно и без лишней воды. "
+        "Пока ничего не публикуй автоматически — сначала жди подтверждения пользователя."
+    ),
+    input=message.text,
+)
 
         await message.reply_text(response.output_text)
 
