@@ -214,15 +214,15 @@ async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_group_id = message.media_group_id
 
     try:
-        if media_group_id:
+     if media_group_id:
         if media_group_id not in photo_groups:
-        photo_groups[media_group_id] = []
+            photo_groups[media_group_id] = []
 
-     photo_groups[media_group_id].append(message.photo[-1].file_id)
-     asyncio.create_task(
-    process_photo_group(media_group_id, message, context)
-)
-     return
+        photo_groups[media_group_id].append(message.photo[-1].file_id)
+      asyncio.create_task(
+      process_photo_group(media_group_id, message, context)
+     )
+      return
         photo = message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         photo_bytes = await file.download_as_bytearray()
