@@ -1,6 +1,7 @@
 """Telegram update handlers."""
 
 import base64
+import asyncio
 import logging
 import os
 from openai import AsyncOpenAI
@@ -13,6 +14,7 @@ from bot import cache, db
 
 
 logger = logging.getLogger(__name__)
+photo_groups = {}
 
 openai_client = AsyncOpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -153,14 +155,74 @@ async def echo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             "Не удалось получить ответ от ИИ. Попробуй ещё раз."
         )
+async def process_photo_group(media_group_id, message, context):
+    await asyncio.sleep(2)
 
+    file_ids = photo_groups.pop(media_group_id, [])
+
+    if not file_ids:
+        return
+
+    try:
+        content = [
+            {
+                "type": "input_text",
+                "text": (
+                    "Это фотографии из одного альбома. "
+                    "Сравни их, выбери лучшие для поста ВКонтакте "
+                    "и объясни свой выбор. Затем предложи текст поста."
+                ),
+            }
+        ]
+
+        for file_id in file_ids:
+            file = await context.bot.get_file(file_id)
+            photo_bytes = await file.download_as_bytearray()
+            image_b64 = base64.b64encode(photo_bytes).decode("utf-8")
+
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{image_b64}",
+                }
+            )
+
+        response = await openai_client.responses.create(
+            model="openrouter/free",
+            instructions=(
+                "Ты — VK AI Manager. Отвечай по-русски. "
+                "Анализируй фотографии как контент-менеджер ВКонтакте."
+            ),
+            input=[
+                {
+                    "role": "user",
+                    "content": content,
+                }
+            ],
+        )
+
+        await message.reply_text(response.output_text)
+
+    except Exception:
+        logger.exception("Photo group AI request failed")
+        await message.reply_text("Не удалось проанализировать альбом.")
 async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
 
     if message is None or not message.photo:
         return
+    media_group_id = message.media_group_id
 
     try:
+        if media_group_id:
+        if media_group_id not in photo_groups:
+        photo_groups[media_group_id] = []
+
+     photo_groups[media_group_id].append(message.photo[-1].file_id)
+     asyncio.create_task(
+    process_photo_group(media_group_id, message, context)
+)
+     return
         photo = message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         photo_bytes = await file.download_as_bytearray()
