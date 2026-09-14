@@ -464,6 +464,15 @@ def media_review_keyboard(ready_allowed: bool = True):
     )
 
 
+def publish_confirmation_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🚀 Да, публикуем", callback_data="media_publish_confirm")],
+            [InlineKeyboardButton("❌ Нет, оставить черновиком", callback_data="media_publish_cancel")],
+        ]
+    )
+
+
 async def send_media_result(message, context: ContextTypes.DEFAULT_TYPE, result: str):
     city = None
     try:
@@ -521,10 +530,48 @@ async def media_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         context.user_data["approved_draft"] = draft
+        context.user_data["publish_confirmed"] = False
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(
-            "✅ Зафиксировала этот вариант как готовый.\n\n"
-            "В VK я пока ничего не публикую. Следующим шагом подключим отдельное подтверждение «Публикуем?»."
+            "✅ Вариант прошёл проверку и зафиксирован как готовый.\n\n"
+            "Публикуем?\n\n"
+            "Важно: сейчас это только финальное подтверждение. В VK бот ещё ничего не отправляет.",
+            reply_markup=publish_confirmation_keyboard(),
+        )
+        return
+
+    if query.data == "media_publish_confirm":
+        draft = context.user_data.get("approved_draft")
+        if not draft:
+            await query.message.reply_text(
+                "Готовый черновик уже потерялся. Пришли фото или видео ещё раз и сначала нажми «Готово к публикации»."
+            )
+            return
+
+        # Последняя проверка перед будущим подключением VK.
+        warnings = media_fact_warnings(draft)
+        if warnings:
+            context.user_data["publish_confirmed"] = False
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                "⚠️ Финальная проверка нашла риск в тексте. Публикацию не подтверждаю. "
+                "Пришли материал ещё раз или переделай черновик."
+            )
+            return
+
+        context.user_data["publish_confirmed"] = True
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "🚀 Подтверждение получено. Пакет публикации готов.\n\n"
+            "В VK пока НИЧЕГО не отправлено — реальное подключение VK будет отдельным следующим этапом."
+        )
+        return
+
+    if query.data == "media_publish_cancel":
+        context.user_data["publish_confirmed"] = False
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "📝 Оставила этот вариант черновиком. В VK ничего не отправлено."
         )
         return
 
@@ -1664,7 +1711,12 @@ async def error_handler(update: object, context: CallbackContext):
 
 
 def register_handlers(application: Application):
-    application.add_handler(CallbackQueryHandler(media_review_callback, pattern=r"^media_(ready|redo)$"))
+    application.add_handler(
+        CallbackQueryHandler(
+            media_review_callback,
+            pattern=r"^media_(ready|redo|publish_confirm|publish_cancel)$",
+        )
+    )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("post", post_command))
