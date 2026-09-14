@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -51,16 +52,23 @@ VISION_MODEL = os.getenv(
     "openrouter/free",
 ).strip()
 
+VIDEO_MODEL = os.getenv(
+    "OPENROUTER_VIDEO_MODEL",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+).strip()
+
 ADMIN_TELEGRAM_ID = os.getenv(
     "ADMIN_TELEGRAM_ID",
     "",
 ).strip()
 
+MAX_VIDEO_BYTES = 18 * 1024 * 1024
+
 
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY or "missing-key",
     base_url="https://openrouter.ai/api/v1",
-    timeout=60.0,
+    timeout=90.0,
 )
 
 
@@ -118,8 +126,6 @@ CREATE TABLE IF NOT EXISTS vk_manager_task_history (
 SYSTEM_PROMPT = """
 Ты — VK AI Manager, личный AI-контент-менеджер пользователя.
 
-ПОЗИЦИОНИРОВАНИЕ
-
 Это личный авторский блог женщины и мамы,
 жизнь которой связана с Мурманском и Нижним Новгородом.
 
@@ -133,21 +139,6 @@ SYSTEM_PROMPT = """
 Дети, семья, поездки, материнство и быт —
 естественная часть жизни,
 но не единственная тема.
-
-ОСНОВНЫЕ НАПРАВЛЕНИЯ
-
-— сама автор, её взгляд и характер;
-— жизнь между двумя городами;
-— контраст Мурманска и Нижнего Новгорода;
-— настоящая повседневность;
-— семья и дети как часть жизни;
-— поездки и дороги;
-— бытовой юмор;
-— личные мысли;
-— красивые обычные моменты;
-— полезный личный опыт;
-— фотоистории;
-— короткие вертикальные видео.
 
 ЦЕЛЬ
 
@@ -164,34 +155,18 @@ SYSTEM_PROMPT = """
 
 ЯЗЫК
 
-Всегда отвечай на естественном русском языке.
+Всегда отвечай на хорошем естественном русском языке.
 
 Не смешивай русский и английский.
 
-Не используй английские слова,
-если есть нормальный русский вариант.
-
-Не создавай смешанные слова.
+Не создавай гибридные или сломанные слова.
 
 Перед отправкой ответа проверь:
 
 1. Нет ли случайных иностранных слов.
 2. Нет ли сломанных слов.
 3. Звучит ли ответ естественно.
-4. Нет ли ненужного профессионального жаргона.
-
-Используй русские термины:
-
-— пост;
-— клип;
-— история;
-— фотография;
-— видео;
-— карусель;
-— охват;
-— вовлечённость;
-— подписчики;
-— публикация.
+4. Нет ли лишнего профессионального жаргона.
 
 НЕ ВЫДУМЫВАЙ ФАКТЫ
 
@@ -214,122 +189,105 @@ SYSTEM_PROMPT = """
 — погоду;
 — то, где пользователь находится.
 
-Если текущий город передан
-как сохранённый город пользователя,
+Если текущий город передан как сохранённый,
 считай его подтверждённым фактом.
 
-Не спрашивай город повторно,
-если он уже указан в контексте.
+Не спрашивай город повторно.
 
-УПРАВЛЕНИЕ КОНТЕНТОМ
+КОНТЕНТ
 
-Ты должен сам выбирать:
-
-— что лучше снять;
-— какие кадры нужны;
-— какой формат использовать;
-— что найти в галерее;
-— что публиковать следующим;
-— зачем материал нужен странице.
-
-Не выдавай меню вариантов,
-если пользователь просит принять решение.
-
-Если команда означает:
+Если пользователь спрашивает:
 «Что делать сегодня?»,
 выбери ОДНУ лучшую задачу.
 
-Не пиши:
-«можно выбрать первое, второе или третье».
+Не выдавай меню вариантов.
 
-Прими решение самостоятельно.
+Не предлагай несколько идей на выбор.
 
-ПОВТОРЫ
-
-Очень важно разнообразие.
+РАЗНООБРАЗИЕ
 
 Если тебе переданы предыдущие задания,
-не повторяй их механику и сюжет.
+не повторяй их центральную механику.
 
-Не предлагай несколько дней подряд одно и то же:
+Особенно не повторяй слишком часто:
 
 — кофе;
-— чашку в руках;
+— чашку;
 — вид из окна;
-— дорогу под ногами;
+— ноги;
+— шаги;
 — обычный маршрут;
+— прогулку;
 — селфи;
 — отражение;
 — тень;
-— прогулку без конкретной идеи.
+— дверь;
+— подъезд;
+— туристическую достопримечательность просто как фон.
 
 Ищи новый угол.
 
 Чередуй:
 
-1. саму автора;
-2. городской контекст;
-3. два города;
-4. семью;
-5. юмор;
-6. личные мысли;
-7. бытовые наблюдения;
-8. визуальные истории;
-9. полезный опыт;
-10. вовлекающие темы;
-11. короткие видео;
-12. фотоистории.
+— саму автора;
+— её мнение;
+— городской контекст;
+— два города;
+— семью;
+— бытовой юмор;
+— личные мысли;
+— детали с историей;
+— полезный реальный опыт;
+— фотоистории;
+— короткие видео;
+— вовлекающие темы.
 
-Не превращай страницу
-в бесконечную ленту фотографий детей.
+ФОТО И ВИДЕО
 
-Не публикуй что-либо
-только ради ежедневной активности.
+Анализируй только то,
+что действительно видно или слышно.
 
-Иногда отсутствие публикации
-лучше слабого материала.
+Учитывай подпись пользователя.
 
-ФОТОГРАФИИ
+Не устанавливай личности людей.
 
-Если пользователь прислал фото:
+Не делай чувствительных выводов.
 
-— анализируй только то, что видно;
-— не устанавливай личности;
-— не придумывай обстоятельства;
-— выбирай сильные кадры;
-— объясняй выбор;
-— предлагай, нужен ли пост;
-— если материала мало, скажи, что доснять.
+Не придумывай обстоятельства съёмки.
 
-ГОТОВЫЙ ПОСТ
+Если речь в видео слышна плохо —
+скажи об этом прямо.
 
-По умолчанию:
+Не придумывай расшифровку речи.
 
-1. сильная первая строка;
-2. естественный основной текст;
-3. призыв к действию только если он нужен;
-4. от 0 до 5 уместных хэштегов;
-5. строка:
-   «Зачем этот пост: ...»
+Для видео оцени:
 
-Тон:
-живой, умный, современный, тёплый.
+— есть ли сильный материал;
+— что происходит;
+— какой фрагмент лучше;
+— что убрать;
+— что сократить;
+— подходит ли материал для клипа;
+— подходит ли материал для обычного поста;
+— нужен ли текст;
+— нужен ли голос;
+— нужны ли титры;
+— зачем этот материал странице.
+
+ТОН
+
+Пиши живо, умно, современно и тепло.
 
 Без пафоса.
-Без искусственной мотивации.
 Без рекламного канцелярита.
 Без пустого кликбейта.
+Без спама.
+Без накрутки.
 
-Не используй спам и накрутку.
 Не обещай гарантированный рост.
 
-Если можно решить самостоятельно —
-решай.
-
-Если вопрос действительно необходим —
-максимум один короткий вопрос.
-
 Ничего не публикуй автоматически.
+
 Финальное решение всегда принимает пользователь.
 """.strip()
 
@@ -337,11 +295,16 @@ SYSTEM_PROMPT = """
 HELP_TEXT = """
 Я — VK AI Manager.
 
-Я веду твою личную страницу как контент-менеджер.
+Я умею:
 
-Я помню текущий город
-и последние задания,
-чтобы не предлагать одно и то же.
+— помнить текущий город;
+— помнить последние задания;
+— выбирать одну задачу на сегодня;
+— составлять планы;
+— писать посты;
+— анализировать фотографии;
+— анализировать короткие видео;
+— советовать, что оставить и что убрать.
 
 Команды:
 
@@ -359,12 +322,11 @@ HELP_TEXT = """
 
 или
 
-«Я сейчас в Нижнем Новгороде»
+«Я сейчас в Нижнем Новгороде».
 
-Можно присылать фотографии и альбомы.
+Можно присылать фото и короткие видео.
 
-Я не выдумываю факты твоей жизни
-и ничего не публикую без твоего решения.
+Ничего не публикуется без твоего решения.
 """.strip()
 
 
@@ -410,7 +372,10 @@ async def guard(update: Update) -> bool:
 
 
 def ai_ready() -> bool:
-    return bool(OPENROUTER_API_KEY)
+
+    return bool(
+        OPENROUTER_API_KEY
+    )
 
 
 async def ensure_profile_table(
@@ -422,7 +387,9 @@ async def ensure_profile_table(
     ):
         return True
 
-    pool = context.bot_data.get(DB_KEY)
+    pool = context.bot_data.get(
+        DB_KEY
+    )
 
     if pool is None:
         return False
@@ -457,7 +424,9 @@ async def ensure_task_history_table(
     ):
         return True
 
-    pool = context.bot_data.get(DB_KEY)
+    pool = context.bot_data.get(
+        DB_KEY
+    )
 
     if pool is None:
         return False
@@ -493,14 +462,14 @@ async def set_current_city(
         "current_city"
     ] = city
 
-    ready = await ensure_profile_table(
+    if not await ensure_profile_table(
         context
-    )
-
-    if not ready:
+    ):
         return
 
-    pool = context.bot_data.get(DB_KEY)
+    pool = context.bot_data.get(
+        DB_KEY
+    )
 
     if pool is None:
         return
@@ -544,14 +513,14 @@ async def get_current_city(
     if cached:
         return str(cached)
 
-    ready = await ensure_profile_table(
+    if not await ensure_profile_table(
         context
-    )
-
-    if not ready:
+    ):
         return ""
 
-    pool = context.bot_data.get(DB_KEY)
+    pool = context.bot_data.get(
+        DB_KEY
+    )
 
     if pool is None:
         return ""
@@ -590,14 +559,14 @@ async def save_today_task(
     task_text: str,
 ) -> None:
 
-    ready = await ensure_task_history_table(
+    if not await ensure_task_history_table(
         context
-    )
-
-    if not ready:
+    ):
         return
 
-    pool = context.bot_data.get(DB_KEY)
+    pool = context.bot_data.get(
+        DB_KEY
+    )
 
     if pool is None:
         return
@@ -643,14 +612,14 @@ async def get_recent_tasks(
     telegram_id: int,
 ) -> list[str]:
 
-    ready = await ensure_task_history_table(
+    if not await ensure_task_history_table(
         context
-    )
-
-    if not ready:
+    ):
         return []
 
-    pool = context.bot_data.get(DB_KEY)
+    pool = context.bot_data.get(
+        DB_KEY
+    )
 
     if pool is None:
         return []
@@ -702,18 +671,143 @@ def detect_city(
     ):
         return "Нижний Новгород"
 
-    short_nizhny = {
+    if normalized in {
         "нижний",
         "в нижнем",
         "я в нижнем",
         "сейчас в нижнем",
         "я сейчас в нижнем",
-    }
-
-    if normalized in short_nizhny:
+    }:
         return "Нижний Новгород"
 
     return None
+
+
+def is_location_statement(
+    text: str,
+) -> bool:
+
+    normalized = (
+        text
+        .lower()
+        .replace("ё", "е")
+        .strip(" .,!?:;")
+    )
+
+    if normalized in {
+        "мурманск",
+        "в мурманске",
+        "нижний",
+        "в нижнем",
+        "нижний новгород",
+        "в нижнем новгороде",
+    }:
+        return True
+
+    phrases = (
+        "я сейчас в ",
+        "сейчас я в ",
+        "я в ",
+        "нахожусь в ",
+        "я теперь в ",
+        "теперь я в ",
+        "сегодня я в ",
+        "приехала в ",
+        "вернулась в ",
+    )
+
+    return any(
+        phrase in normalized
+        for phrase in phrases
+    )
+
+
+def recent_repeat_signals(
+    tasks: list[str],
+) -> list[str]:
+
+    if not tasks:
+        return []
+
+    joined = (
+        " ".join(tasks)
+        .lower()
+        .replace("ё", "е")
+    )
+
+    groups = {
+        "кофе или чашка": (
+            "кофе",
+            "чашк",
+        ),
+        "вид из окна": (
+            "окн",
+        ),
+        "селфи": (
+            "селфи",
+        ),
+        "ноги или шаги": (
+            "ног",
+            "шаг",
+        ),
+        "маршрут или прогулка": (
+            "маршрут",
+            "прогул",
+        ),
+        "отражение или тень": (
+            "отражен",
+            "тень",
+        ),
+        "дверь или подъезд": (
+            "двер",
+            "подъезд",
+        ),
+        "туристическая точка как фон": (
+            "кремл",
+            "чкалов",
+            "набережн",
+            "достопримеч",
+        ),
+    }
+
+    signals = []
+
+    for label, stems in groups.items():
+
+        if any(
+            stem in joined
+            for stem in stems
+        ):
+            signals.append(
+                label
+            )
+
+    return signals
+
+
+def has_suspicious_latin(
+    text: str,
+) -> bool:
+
+    cleaned = re.sub(
+        r"https?://\S+",
+        "",
+        text,
+    )
+
+    cleaned = re.sub(
+        r"\bVK\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    return bool(
+        re.search(
+            r"[A-Za-z]",
+            cleaned,
+        )
+    )
 
 
 async def send_long_text(
@@ -744,7 +838,9 @@ async def send_long_text(
         )
     ]
 
-    for index, part in enumerate(parts):
+    for index, part in enumerate(
+        parts
+    ):
 
         markup = (
             reply_markup
@@ -758,19 +854,26 @@ async def send_long_text(
         )
 
 
-def extract_chat_text(response) -> str:
+def extract_chat_text(
+    response,
+) -> str:
 
     if not response.choices:
         return ""
 
-    message = response.choices[0].message
+    message = response.choices[
+        0
+    ].message
 
     if message is None:
         return ""
 
     content = message.content
 
-    if isinstance(content, str):
+    if isinstance(
+        content,
+        str,
+    ):
         return content.strip()
 
     return ""
@@ -795,7 +898,9 @@ async def request_text_model(
         ],
     )
 
-    return extract_chat_text(response)
+    return extract_chat_text(
+        response
+    )
 
 
 async def ai_text(
@@ -809,7 +914,10 @@ async def ai_text(
             "OPENROUTER_API_KEY is not configured"
         )
 
-    primary_model = model or TEXT_MODEL
+    primary_model = (
+        model
+        or TEXT_MODEL
+    )
 
     try:
 
@@ -833,18 +941,16 @@ async def ai_text(
             error,
         )
 
-    if primary_model == FALLBACK_TEXT_MODEL:
+    if (
+        primary_model
+        == FALLBACK_TEXT_MODEL
+    ):
 
         raise RuntimeError(
             "OpenRouter returned an empty response"
         )
 
     try:
-
-        logger.info(
-            "Trying fallback model: %s",
-            FALLBACK_TEXT_MODEL,
-        )
 
         text = await request_text_model(
             FALLBACK_TEXT_MODEL,
@@ -864,6 +970,42 @@ async def ai_text(
     raise RuntimeError(
         "OpenRouter primary and fallback models failed"
     )
+
+
+async def rewrite_to_clean_russian(
+    text: str,
+) -> str:
+
+    if not has_suspicious_latin(
+        text
+    ):
+        return text
+
+    try:
+
+        cleaned = await ai_text(
+            "Перепиши следующий ответ без изменения смысла.\n"
+            "Оставь ту же структуру и эмодзи.\n"
+            "Удали случайные английские и смешанные слова.\n"
+            "Используй только грамотный русский язык.\n"
+            "Не добавляй новых фактов.\n"
+            "Слово VK можно оставить.\n\n"
+            + text,
+            model=FALLBACK_TEXT_MODEL,
+        )
+
+        return (
+            cleaned
+            or text
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Russian cleanup failed"
+        )
+
+        return text
 
 
 async def telegram_photo_data_url(
@@ -902,28 +1044,31 @@ async def ai_post_from_photos(
         else "не указан"
     )
 
-    content: list[dict[str, Any]] = [
+    content: list[
+        dict[str, Any]
+    ] = [
         {
             "type": "input_text",
             "text": (
-                "Ты получил фотографии для личной "
-                "страницы пользователя ВКонтакте.\n\n"
+                "Ты получил фотографии "
+                "для личной страницы ВКонтакте.\n\n"
                 "Сохранённый текущий город пользователя: "
                 + city_context
                 + ".\n\n"
                 "Не утверждай, что фотография сделана "
                 "в этом городе, если это не видно "
                 "и пользователь этого не написал.\n\n"
-                "Проанализируй фотографии как "
-                "контент-менеджер.\n"
-                "Если фотографий несколько — выбери "
-                "сильные кадры и лучший порядок.\n"
+                "Проанализируй фотографии "
+                "как контент-менеджер.\n"
+                "Если фотографий несколько — "
+                "выбери сильные кадры "
+                "и лучший порядок.\n"
                 "Не придумывай обстоятельства съёмки.\n"
-                "Если материал подходит — создай "
-                "один готовый пост.\n"
-                "Если материал слабый — скажи, "
-                "что лучше доснять.\n\n"
-                "Пиши только на естественном русском.\n\n"
+                "Если материал подходит — "
+                "создай один готовый пост.\n"
+                "Если материал слабый — "
+                "скажи, что лучше доснять.\n\n"
+                "Пиши только на естественном русском языке.\n\n"
                 "После текста напиши:\n"
                 "Лучшие фото: ...\n"
                 "Почему: ...\n"
@@ -937,7 +1082,9 @@ async def ai_post_from_photos(
         }
     ]
 
-    for file_id in file_ids[:10]:
+    for file_id in file_ids[
+        :10
+    ]:
 
         image_url = await telegram_photo_data_url(
             context,
@@ -974,6 +1121,147 @@ async def ai_post_from_photos(
         )
 
     return text
+
+
+async def telegram_video_data_url(
+    context: ContextTypes.DEFAULT_TYPE,
+    file_id: str,
+    mime_type: str | None,
+) -> str:
+
+    tg_file = await context.bot.get_file(
+        file_id
+    )
+
+    raw = await tg_file.download_as_bytearray()
+
+    encoded = base64.b64encode(
+        raw
+    ).decode(
+        "utf-8"
+    )
+
+    mime = (
+        mime_type
+        or "video/mp4"
+    ).lower()
+
+    if mime not in {
+        "video/mp4",
+        "video/quicktime",
+        "video/webm",
+        "video/mpeg",
+    }:
+
+        mime = "video/mp4"
+
+    return (
+        f"data:{mime};base64,"
+        f"{encoded}"
+    )
+
+
+async def ai_analyze_video(
+    context: ContextTypes.DEFAULT_TYPE,
+    file_id: str,
+    mime_type: str | None,
+    caption: str,
+    current_city: str,
+) -> str:
+
+    video_url = await telegram_video_data_url(
+        context,
+        file_id,
+        mime_type,
+    )
+
+    city_context = (
+        current_city
+        if current_city
+        else "не указан"
+    )
+
+    prompt = (
+        "Проанализируй присланное видео "
+        "как личный контент-менеджер "
+        "страницы ВКонтакте.\n\n"
+        "Сохранённый текущий город пользователя: "
+        + city_context
+        + ".\n"
+        "Не утверждай место съёмки "
+        "только на основании сохранённого города.\n"
+        "Опирайся только на то, "
+        "что реально видно или слышно в видео, "
+        "и на подпись пользователя.\n\n"
+        "Не придумывай речь, события, людей, "
+        "место или обстоятельства.\n"
+        "Если речь слышна плохо — так и скажи.\n\n"
+        "Ответ строго по-русски в формате:\n\n"
+        "🎬 Вердикт\n"
+        "Стоит использовать / лучше не использовать "
+        "+ коротко почему.\n\n"
+        "👀 Что в видео работает\n"
+        "2–4 конкретных наблюдения.\n\n"
+        "✂️ Что изменить\n"
+        "Что обрезать, сократить или переставить.\n\n"
+        "⭐ Лучший момент\n"
+        "Опиши сильнейший фрагмент. "
+        "Если можешь уверенно определить время — "
+        "укажи его. Иначе не выдумывай секунды.\n\n"
+        "📱 Как использовать в VK\n"
+        "Клип, пост с видео или не публиковать — "
+        "выбери один вариант.\n\n"
+        "✍️ Текст\n"
+        "Дай короткую готовую подпись "
+        "только из известных фактов.\n\n"
+        "💡 Зачем\n"
+        "Одно предложение о роли материала "
+        "в развитии страницы.\n\n"
+        "Подпись пользователя к видео: "
+        + (
+            caption
+            or "нет"
+        )
+    )
+
+    response = await openai_client.chat.completions.create(
+        model=VIDEO_MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            SYSTEM_PROMPT
+                            + "\n\n"
+                            + prompt
+                        ),
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {
+                            "url": video_url,
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+
+    text = extract_chat_text(
+        response
+    )
+
+    if not text:
+
+        raise RuntimeError(
+            "Video model returned an empty response"
+        )
+
+    return await rewrite_to_clean_russian(
+        text
+    )
 
 
 def save_draft(
@@ -1030,14 +1318,18 @@ async def build_today_task(
         telegram_id,
     )
 
+    repeat_signals = recent_repeat_signals(
+        recent_tasks
+    )
+
     history_text = ""
 
     if recent_tasks:
 
         history_text = (
-            "\n\nВОТ ПРЕДЫДУЩИЕ ЗАДАНИЯ.\n"
-            "Новое задание НЕ должно повторять "
-            "их сюжет, механику или набор кадров:\n\n"
+            "\n\nПРЕДЫДУЩИЕ ЗАДАНИЯ.\n"
+            "Новое задание не должно повторять "
+            "их центральный сюжет или механику:\n\n"
         )
 
         for index, task in enumerate(
@@ -1046,11 +1338,26 @@ async def build_today_task(
         ):
 
             history_text += (
-                f"{index}. {task[:900]}\n\n"
+                f"{index}. "
+                f"{task[:750]}\n\n"
             )
 
+    blocked_text = ""
+
+    if repeat_signals:
+
+        blocked_text = (
+            "\n\nВ ПОСЛЕДНИХ ЗАДАНИЯХ УЖЕ ВСТРЕЧАЛИСЬ:\n— "
+            + "\n— ".join(
+                repeat_signals
+            )
+            + "\nНе используй эти элементы "
+            "в новом задании, "
+            "если без них можно обойтись."
+        )
+
     prompt = (
-        "Рабочий режим: ты личный контент-менеджер "
+        "Ты личный контент-менеджер "
         "и сам принимаешь решение.\n\n"
         "Подтверждённый текущий город пользователя: "
         + city
@@ -1058,32 +1365,16 @@ async def build_today_task(
         "Не спрашивай город снова.\n\n"
         "Выбери ОДНУ конкретную задачу на сегодня "
         "для развития личной страницы VK.\n\n"
-        "Новое задание должно отличаться "
-        "от предыдущих.\n"
-        "Не повторяй один и тот же сюжет "
-        "несколько дней подряд.\n"
-        "Не скатывайся каждый раз в кофе, "
-        "окно, ноги, маршрут и селфи.\n\n"
-        "Можно выбрать другой тип материала:\n"
-        "— разговорное короткое видео;\n"
-        "— наблюдение;\n"
-        "— бытовой юмор;\n"
-        "— история из жизни;\n"
-        "— деталь двух городов;\n"
-        "— мнение автора;\n"
-        "— фотоистория;\n"
-        "— один сильный портрет;\n"
-        "— предмет или деталь с историей;\n"
-        "— вопрос аудитории;\n"
-        "— полезный личный опыт.\n\n"
         "Не предлагай несколько вариантов.\n"
         "Не заканчивай вопросом.\n"
-        "Не придумывай события, погоду "
-        "или планы семьи.\n"
+        "Не придумывай события, погоду, "
+        "планы семьи или посещённые места.\n"
+        "Не отправляй пользователя специально "
+        "к достопримечательности только ради фона.\n"
         "Задача должна быть выполнима телефоном.\n\n"
-        "Пиши только на естественном русском языке.\n"
-        "Не используй иностранные слова "
-        "без необходимости.\n\n"
+        "Не используй по умолчанию кофе, окно, ноги, "
+        "маршрут, селфи, отражение, тень, дверь "
+        "или подъезд.\n\n"
         "Ответ строго в формате:\n\n"
         "🎯 Сегодня\n"
         "Одна конкретная идея.\n\n"
@@ -1094,12 +1385,18 @@ async def build_today_task(
         "📤 Потом пришли мне\n"
         "Что именно отправить боту.\n\n"
         "💡 Зачем\n"
-        "Одна короткая причина.\n\n"
-        "После этого остановись."
+        "Одна короткая причина.\n"
+        + blocked_text
         + history_text
     )
 
-    result = await ai_text(prompt)
+    result = await ai_text(
+        prompt
+    )
+
+    result = await rewrite_to_clean_russian(
+        result
+    )
 
     await save_today_task(
         context,
@@ -1121,10 +1418,15 @@ async def start(
     message = update.effective_message
     user = update.effective_user
 
-    if message is None or user is None:
+    if (
+        message is None
+        or user is None
+    ):
         return
 
-    pool = context.bot_data.get(DB_KEY)
+    pool = context.bot_data.get(
+        DB_KEY
+    )
 
     if pool is not None:
 
@@ -1168,16 +1470,16 @@ async def start(
         )
 
     memory_line = (
-        "\nПамять последних заданий: ✅"
-        if recent_tasks
-        else "\nПамять заданий готова к работе."
+        "\nПамять заданий: "
+        + str(len(recent_tasks))
+        + "/10."
     )
 
     await message.reply_text(
         "Привет! Я VK AI Manager.\n\n"
         "Я работаю как менеджер твоей личной страницы VK.\n"
-        "Я сам выбираю следующий контент, "
-        "анализирую фотографии и готовлю публикации."
+        "Теперь я умею анализировать "
+        "фотографии и короткие видео."
         + city_line
         + memory_line,
         reply_markup=MAIN_MENU_KEYBOARD,
@@ -1209,7 +1511,10 @@ async def myid(
 
     user = update.effective_user
 
-    if update.effective_message and user:
+    if (
+        update.effective_message
+        and user
+    ):
 
         await update.effective_message.reply_text(
             "Твой Telegram ID: "
@@ -1272,7 +1577,10 @@ async def status_command(
     message = update.effective_message
     user = update.effective_user
 
-    if message is None or user is None:
+    if (
+        message is None
+        or user is None
+    ):
         return
 
     city = await get_current_city(
@@ -1285,33 +1593,29 @@ async def status_command(
         user.id,
     )
 
-    ai = "✅" if ai_ready() else "❌"
-
-    lock = (
-        "✅"
-        if ADMIN_TELEGRAM_ID
-        else "⚠️"
-    )
-
-    city_status = (
-        city
-        if city
-        else "не указан"
-    )
-
     await message.reply_text(
         "ИИ OpenRouter: "
-        + ai
+        + (
+            "✅"
+            if ai_ready()
+            else "❌"
+        )
         + "\nЗакрытый доступ: "
-        + lock
+        + (
+            "✅"
+            if ADMIN_TELEGRAM_ID
+            else "⚠️"
+        )
         + "\nТекущий город: "
-        + city_status
-        + "\nКонцепция страницы: ✅"
-        + "\nРусский язык ответов: ✅"
+        + (
+            city
+            or "не указан"
+        )
         + "\nПамять заданий: "
         + str(len(recent_tasks))
         + "/10"
-        + "\nРезервная AI-модель: ✅"
+        + "\nАнализ фото: ✅"
+        + "\nАнализ коротких видео: ✅"
         + "\nАвтопубликация в VK: выключена"
     )
 
@@ -1327,7 +1631,10 @@ async def today_command(
     message = update.effective_message
     user = update.effective_user
 
-    if message is None or user is None:
+    if (
+        message is None
+        or user is None
+    ):
         return
 
     city = await get_current_city(
@@ -1359,7 +1666,8 @@ async def today_command(
         if not result:
 
             await message.reply_text(
-                "Сначала скажи, в каком городе ты сейчас."
+                "Сначала скажи, "
+                "в каком городе ты сейчас."
             )
 
             return
@@ -1392,7 +1700,10 @@ async def strategy_command(
     message = update.effective_message
     user = update.effective_user
 
-    if message is None or user is None:
+    if (
+        message is None
+        or user is None
+    ):
         return
 
     city = await get_current_city(
@@ -1408,13 +1719,12 @@ async def strategy_command(
 
         prompt = (
             "Составь практичную стратегию развития "
-            "этой конкретной личной страницы VK "
-            "на 30 дней.\n"
+            "этой личной страницы VK на 30 дней.\n"
             "Не выдумывай события жизни.\n"
             "Дай рубрики, форматы, частоту, "
-            "гипотезы роста, принципы отбора фото "
-            "и план первых 7 дней.\n"
-            "Пиши только естественным русским языком."
+            "гипотезы роста, принципы отбора "
+            "фото и видео и план первых 7 дней.\n"
+            "Пиши естественным русским языком."
         )
 
         if city:
@@ -1425,7 +1735,9 @@ async def strategy_command(
                 + ". Не спрашивай его снова."
             )
 
-        result = await ai_text(prompt)
+        result = await ai_text(
+            prompt
+        )
 
         await send_long_text(
             message,
@@ -1454,7 +1766,10 @@ async def plan_command(
     message = update.effective_message
     user = update.effective_user
 
-    if message is None or user is None:
+    if (
+        message is None
+        or user is None
+    ):
         return
 
     city = await get_current_city(
@@ -1480,6 +1795,7 @@ async def plan_command(
             "Чередуй разные типы контента.\n"
             "Не повторяй одинаковые механики.\n"
             "Можно оставить дни без публикации.\n"
+            "Учитывай фото и короткие видео.\n"
             "Пиши естественным русским языком."
         )
 
@@ -1498,14 +1814,18 @@ async def plan_command(
                 "Не повторяй их буквально:\n"
             )
 
-            for task in recent_tasks[:7]:
+            for task in recent_tasks[
+                :7
+            ]:
 
                 prompt += (
                     "\n— "
                     + task[:500]
                 )
 
-        result = await ai_text(prompt)
+        result = await ai_text(
+            prompt
+        )
 
         context.user_data[
             "last_plan"
@@ -1538,7 +1858,10 @@ async def next_command(
     message = update.effective_message
     user = update.effective_user
 
-    if message is None or user is None:
+    if (
+        message is None
+        or user is None
+    ):
         return
 
     city = await get_current_city(
@@ -1557,8 +1880,8 @@ async def next_command(
         "Не давай меню вариантов.\n"
         "Не выдумывай события.\n"
         "Не повторяй последние задания.\n"
-        "Дай цель, формат, что снять или найти "
-        "в галерее и зачем это нужно.\n"
+        "Дай цель, формат, что снять "
+        "или найти в галерее и зачем это нужно.\n"
         "Пиши естественным русским языком."
     )
 
@@ -1576,7 +1899,9 @@ async def next_command(
             "\n\nПоследние задания:\n"
         )
 
-        for task in recent_tasks[:5]:
+        for task in recent_tasks[
+            :5
+        ]:
 
             prompt += (
                 "\n— "
@@ -1585,7 +1910,9 @@ async def next_command(
 
     try:
 
-        result = await ai_text(prompt)
+        result = await ai_text(
+            prompt
+        )
 
         await send_long_text(
             message,
@@ -1595,7 +1922,7 @@ async def next_command(
     except Exception:
 
         logger.exception(
-            "Next post recommendation failed"
+            "Next recommendation failed"
         )
 
         await message.reply_text(
@@ -1614,7 +1941,10 @@ async def post_command(
     message = update.effective_message
     user = update.effective_user
 
-    if message is None or user is None:
+    if (
+        message is None
+        or user is None
+    ):
         return
 
     topic = " ".join(
@@ -1660,7 +1990,9 @@ async def post_command(
                 + ". Используй только если уместно."
             )
 
-        text = await ai_text(prompt)
+        text = await ai_text(
+            prompt
+        )
 
         save_draft(
             context,
@@ -1729,7 +2061,7 @@ async def draft_callback(
         try:
 
             new_text = await ai_text(
-                "Переделай этот пост.\n"
+                "Переделай этот текст.\n"
                 "Сделай естественнее.\n"
                 "Не добавляй новых фактов.\n"
                 "Пиши только по-русски.\n\n"
@@ -1758,7 +2090,7 @@ async def draft_callback(
             )
 
             await query.message.reply_text(
-                "Не получилось переделать пост."
+                "Не получилось переделать."
             )
 
 
@@ -1782,9 +2114,14 @@ async def text_message(
 
     text = message.text.strip()
 
-    detected_city = detect_city(text)
+    detected_city = detect_city(
+        text
+    )
 
-    if detected_city:
+    if (
+        detected_city
+        and is_location_statement(text)
+    ):
 
         await set_current_city(
             context,
@@ -1792,68 +2129,42 @@ async def text_message(
             detected_city,
         )
 
-        normalized = (
-            text
-            .lower()
-            .replace("ё", "е")
-            .strip()
+        await message.reply_text(
+            "Запомнила: сейчас ты в "
+            + city_in_phrase(
+                detected_city
+            )
+            + ".\n\n"
+            "Проверяю предыдущие задания "
+            "и выбираю новое…"
         )
 
-        short_city_messages = {
-            "нижний",
-            "в нижнем",
-            "я в нижнем",
-            "сейчас в нижнем",
-            "я сейчас в нижнем",
-            "нижний новгород",
-            "в нижнем новгороде",
-            "я в нижнем новгороде",
-            "я сейчас в нижнем новгороде",
-            "мурманск",
-            "в мурманске",
-            "я в мурманске",
-            "я сейчас в мурманске",
-        }
+        try:
 
-        if (
-            normalized in short_city_messages
-            or len(text) < 60
-        ):
-
-            await message.reply_text(
-                "Запомнила: сейчас ты в "
-                + city_in_phrase(detected_city)
-                + ".\n\n"
-                "Проверяю предыдущие задания "
-                "и выбираю новое…"
+            result = await build_today_task(
+                context,
+                user.id,
             )
 
-            try:
+            if result:
 
-                result = await build_today_task(
-                    context,
-                    user.id,
+                await send_long_text(
+                    message,
+                    result,
                 )
 
-                if result:
+        except Exception:
 
-                    await send_long_text(
-                        message,
-                        result,
-                    )
+            logger.exception(
+                "City update today task failed"
+            )
 
-            except Exception:
+            await message.reply_text(
+                "Город сохранила, "
+                "но не получилось подготовить задачу."
+            )
 
-                logger.exception(
-                    "City update today task failed"
-                )
-
-                await message.reply_text(
-                    "Город сохранила, "
-                    "но не получилось подготовить задачу."
-                )
-
-            return
+        return
 
     current_city = await get_current_city(
         context,
@@ -1862,8 +2173,8 @@ async def text_message(
 
     prompt = (
         text
-        + "\n\nОтвечай только естественным "
-        "русским языком."
+        + "\n\nОтвечай только "
+        "естественным русским языком."
     )
 
     if current_city:
@@ -1876,7 +2187,9 @@ async def text_message(
 
     try:
 
-        response = await ai_text(prompt)
+        response = await ai_text(
+            prompt
+        )
 
         await send_long_text(
             message,
@@ -1903,7 +2216,9 @@ async def process_album_after_delay(
 
     try:
 
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(
+            2.5
+        )
 
         group = PHOTO_GROUPS.pop(
             media_group_id,
@@ -1913,12 +2228,19 @@ async def process_album_after_delay(
         if not group:
             return
 
-        file_ids = group["file_ids"]
-        message = group["message"]
+        file_ids = group[
+            "file_ids"
+        ]
+
+        message = group[
+            "message"
+        ]
+
         caption = group.get(
             "caption",
             "",
         )
+
         user_id = group.get(
             "user_id"
         )
@@ -1998,9 +2320,18 @@ async def photo_message(
     ):
         return
 
-    file_id = message.photo[-1].file_id
-    caption = message.caption or ""
-    media_group_id = message.media_group_id
+    file_id = message.photo[
+        -1
+    ].file_id
+
+    caption = (
+        message.caption
+        or ""
+    )
+
+    media_group_id = (
+        message.media_group_id
+    )
 
     if media_group_id:
 
@@ -2015,18 +2346,29 @@ async def photo_message(
             },
         )
 
-        group["file_ids"].append(
+        group[
+            "file_ids"
+        ].append(
             file_id
         )
 
-        group["message"] = message
-        group["user_id"] = user.id
+        group[
+            "message"
+        ] = message
+
+        group[
+            "user_id"
+        ] = user.id
 
         if caption:
 
-            group["caption"] = caption
+            group[
+                "caption"
+            ] = caption
 
-        old_task = group.get("task")
+        old_task = group.get(
+            "task"
+        )
 
         if (
             old_task
@@ -2035,12 +2377,12 @@ async def photo_message(
 
             old_task.cancel()
 
-        group["task"] = (
-            context.application.create_task(
-                process_album_after_delay(
-                    media_group_id,
-                    context,
-                )
+        group[
+            "task"
+        ] = context.application.create_task(
+            process_album_after_delay(
+                media_group_id,
+                context,
             )
         )
 
@@ -2084,6 +2426,92 @@ async def photo_message(
 
         await message.reply_text(
             "Не удалось обработать фото."
+        )
+
+
+async def video_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if not await guard(update):
+        return
+
+    message = update.effective_message
+    user = update.effective_user
+
+    if (
+        message is None
+        or user is None
+        or message.video is None
+    ):
+        return
+
+    video = message.video
+
+    caption = (
+        message.caption
+        or ""
+    )
+
+    if (
+        video.file_size
+        and video.file_size
+        > MAX_VIDEO_BYTES
+    ):
+
+        await message.reply_text(
+            "Видео слишком большое "
+            "для первого варианта анализа.\n\n"
+            "Пришли более короткий фрагмент — "
+            "лучше до 18 МБ."
+        )
+
+        return
+
+    current_city = await get_current_city(
+        context,
+        user.id,
+    )
+
+    await message.reply_text(
+        "Смотрю видео: кадры, движение и звук. "
+        "Это может занять чуть дольше, "
+        "чем анализ фото…"
+    )
+
+    try:
+
+        result = await ai_analyze_video(
+            context,
+            video.file_id,
+            video.mime_type,
+            caption,
+            current_city,
+        )
+
+        save_draft(
+            context,
+            result,
+        )
+
+        await send_long_text(
+            message,
+            result,
+            reply_markup=draft_keyboard(),
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Video processing failed"
+        )
+
+        await message.reply_text(
+            "Не получилось разобрать это видео.\n\n"
+            "Для первого теста попробуй "
+            "короткий ролик MP4 из галереи, "
+            "лучше до 18 МБ."
         )
 
 
@@ -2290,6 +2718,13 @@ def register_handlers(
         MessageHandler(
             filters.PHOTO,
             photo_message,
+        )
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.VIDEO,
+            video_message,
         )
     )
 
