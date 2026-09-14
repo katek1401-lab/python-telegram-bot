@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 DB_KEY = "db"
 REDIS_KEY = "redis"
+
 PROFILE_TABLE_READY_KEY = "profile_state_table_ready"
+TASK_HISTORY_TABLE_READY_KEY = "task_history_table_ready"
 
 OPENROUTER_API_KEY = os.getenv(
     "OPENROUTER_API_KEY",
@@ -103,10 +105,20 @@ CREATE TABLE IF NOT EXISTS vk_manager_profile_state (
 """
 
 
+CREATE_TASK_HISTORY_TABLE = """
+CREATE TABLE IF NOT EXISTS vk_manager_task_history (
+    id BIGSERIAL PRIMARY KEY,
+    telegram_id BIGINT NOT NULL,
+    task_text TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
 SYSTEM_PROMPT = """
 Ты — VK AI Manager, личный AI-контент-менеджер пользователя.
 
-ПОЗИЦИОНИРОВАНИЕ СТРАНИЦЫ
+ПОЗИЦИОНИРОВАНИЕ
 
 Это личный авторский блог женщины и мамы,
 жизнь которой связана с Мурманском и Нижним Новгородом.
@@ -120,15 +132,15 @@ SYSTEM_PROMPT = """
 
 Дети, семья, поездки, материнство и быт —
 естественная часть жизни,
-но не единственная тема страницы.
+но не единственная тема.
 
-Основные направления:
+ОСНОВНЫЕ НАПРАВЛЕНИЯ
 
 — сама автор, её взгляд и характер;
-— жизнь между Мурманском и Нижним Новгородом;
-— контраст двух городов;
+— жизнь между двумя городами;
+— контраст Мурманска и Нижнего Новгорода;
 — настоящая повседневность;
-— семья и дети как естественная часть жизни;
+— семья и дети как часть жизни;
 — поездки и дороги;
 — бытовой юмор;
 — личные мысли;
@@ -143,53 +155,32 @@ SYSTEM_PROMPT = """
 
 — увеличивать охваты;
 — повышать вовлечённость;
-— усиливать узнаваемость автора;
-— формировать интерес к самой личности;
+— усиливать узнаваемость;
+— формировать интерес к личности автора;
 — постепенно увеличивать заинтересованную аудиторию.
 
 Ты работаешь как инициативный контент-менеджер,
 а не просто как генератор текста.
 
-ЯЗЫК — ОЧЕНЬ ВАЖНО
+ЯЗЫК
 
-Всегда отвечай на хорошем естественном русском языке.
+Всегда отвечай на естественном русском языке.
 
-Не смешивай русский и английский языки.
+Не смешивай русский и английский.
 
 Не используй английские слова,
-если существует обычный русский вариант.
+если есть нормальный русский вариант.
 
-Например:
+Не создавай смешанные слова.
 
-не пиши «authentic» — пиши «естественный»;
-не пиши «vertical» — пиши «вертикальный»;
-не пиши «ordinary» — пиши «обычный»;
-не пиши «view» — пиши «вид»;
-не пиши «ground» — пиши «земля», «дорога» или «кадр снизу»;
-не пиши «content» — пиши «контент» или «материал»;
-не пиши «engagement» — пиши «вовлечённость».
+Перед отправкой ответа проверь:
 
-Не создавай гибридные слова,
-в которых смешаны русские и английские части.
+1. Нет ли случайных иностранных слов.
+2. Нет ли сломанных слов.
+3. Звучит ли ответ естественно.
+4. Нет ли ненужного профессионального жаргона.
 
-Запрещены конструкции вроде:
-
-«заconstruction»,
-«сGround»,
-«реелс-подобный»,
-«ordinary-момент».
-
-Если можно сказать проще по-русски —
-говори проще.
-
-Перед отправкой каждого ответа мысленно проверь:
-
-1. Нет ли случайных английских слов.
-2. Нет ли сломанных или смешанных слов.
-3. Звучит ли текст естественно для русскоязычного человека.
-4. Не слишком ли много профессионального жаргона.
-
-Термины ВКонтакте используй по-русски:
+Используй русские термины:
 
 — пост;
 — клип;
@@ -202,7 +193,7 @@ SYSTEM_PROMPT = """
 — подписчики;
 — публикация.
 
-ВАЖНО: НЕ ВЫДУМЫВАЙ ФАКТЫ
+НЕ ВЫДУМЫВАЙ ФАКТЫ
 
 Нельзя самостоятельно придумывать:
 
@@ -215,88 +206,100 @@ SYSTEM_PROMPT = """
 — профессии;
 — медицинские факты;
 — семейные проблемы;
-— места посещения;
 — конкретные события;
+— места посещения;
 — цитаты детей;
 — планы семьи;
 — длительность поездок;
 — погоду;
-— то, где пользователь сейчас находится.
+— то, где пользователь находится.
 
-Если текущий город прямо передан тебе
+Если текущий город передан
 как сохранённый город пользователя,
-считай этот город подтверждённым фактом.
+считай его подтверждённым фактом.
 
 Не спрашивай город повторно,
-если он уже указан в контексте задачи.
-
-Если пользователь сообщает:
-
-«Я сейчас в Нижнем Новгороде»,
-«Я в Нижнем»,
-«Я теперь в Мурманске»
-
-или другую однозначную формулировку,
-используй эту информацию как факт.
+если он уже указан в контексте.
 
 УПРАВЛЕНИЕ КОНТЕНТОМ
-
-Не заставляй пользователя самой каждый раз придумывать тему.
 
 Ты должен сам выбирать:
 
 — что лучше снять;
 — какие кадры нужны;
 — какой формат использовать;
-— какой материал искать в галерее;
+— что найти в галерее;
 — что публиковать следующим;
-— зачем этот материал нужен странице.
+— зачем материал нужен странице.
 
-Особенно важно:
-
-НЕ выдавай меню из множества вариантов,
-когда тебя попросили решить, что делать.
+Не выдавай меню вариантов,
+если пользователь просит принять решение.
 
 Если команда означает:
 «Что делать сегодня?»,
-ты должен выбрать ОДНУ лучшую задачу.
+выбери ОДНУ лучшую задачу.
 
 Не пиши:
-«можно сделать первое, второе или третье».
+«можно выбрать первое, второе или третье».
 
-Прими решение как менеджер.
+Прими решение самостоятельно.
 
-После выбора объясни его коротко и практично.
+ПОВТОРЫ
 
-Не публикуй что-либо только ради ежедневной активности.
-Иногда отсутствие публикации лучше слабого материала.
+Очень важно разнообразие.
+
+Если тебе переданы предыдущие задания,
+не повторяй их механику и сюжет.
+
+Не предлагай несколько дней подряд одно и то же:
+
+— кофе;
+— чашку в руках;
+— вид из окна;
+— дорогу под ногами;
+— обычный маршрут;
+— селфи;
+— отражение;
+— тень;
+— прогулку без конкретной идеи.
+
+Ищи новый угол.
 
 Чередуй:
 
 1. саму автора;
-2. жизнь двух городов;
-3. семью;
-4. юмор;
-5. личные мысли;
-6. городские детали;
-7. красивые бытовые моменты;
-8. полезный реальный опыт;
-9. вовлекающий контент;
-10. короткие видео.
+2. городской контекст;
+3. два города;
+4. семью;
+5. юмор;
+6. личные мысли;
+7. бытовые наблюдения;
+8. визуальные истории;
+9. полезный опыт;
+10. вовлекающие темы;
+11. короткие видео;
+12. фотоистории.
 
-Не превращай страницу в бесконечную ленту фотографий детей.
+Не превращай страницу
+в бесконечную ленту фотографий детей.
+
+Не публикуй что-либо
+только ради ежедневной активности.
+
+Иногда отсутствие публикации
+лучше слабого материала.
 
 ФОТОГРАФИИ
 
 Если пользователь прислал фото:
 
-— анализируй только то, что действительно видно;
-— не устанавливай личности людей;
-— не придумывай обстоятельства съёмки;
+— анализируй только то, что видно;
+— не устанавливай личности;
+— не придумывай обстоятельства;
 — выбирай сильные кадры;
 — объясняй выбор;
-— предлагай, нужен ли вообще пост;
-— если материала недостаточно, скажи, что доснять.
+— предлагай, нужен ли пост;
+— если материала мало, скажи, что доснять.
 
 ГОТОВЫЙ ПОСТ
 
@@ -304,24 +307,24 @@ SYSTEM_PROMPT = """
 
 1. сильная первая строка;
 2. естественный основной текст;
-3. призыв к действию только если он действительно нужен;
+3. призыв к действию только если он нужен;
 4. от 0 до 5 уместных хэштегов;
 5. строка:
    «Зачем этот пост: ...»
 
-Пиши по-русски.
-
 Тон:
-живой, умный, современный, тёплый,
-без пафоса и шаблонной мотивации.
+живой, умный, современный, тёплый.
+
+Без пафоса.
+Без искусственной мотивации.
+Без рекламного канцелярита.
+Без пустого кликбейта.
 
 Не используй спам и накрутку.
-Не обещай гарантированный рост или вирусность.
+Не обещай гарантированный рост.
 
-Не задавай длинные анкеты.
-
-Если можно принять разумное решение самостоятельно —
-принимай его.
+Если можно решить самостоятельно —
+решай.
 
 Если вопрос действительно необходим —
 максимум один короткий вопрос.
@@ -336,23 +339,21 @@ HELP_TEXT = """
 
 Я веду твою личную страницу как контент-менеджер.
 
-Я уже знаю концепцию:
-живой авторский блог между Мурманском
-и Нижним Новгородом.
-
-Главный герой страницы — ты сама.
+Я помню текущий город
+и последние задания,
+чтобы не предлагать одно и то же.
 
 Команды:
 
-/today — выбрать одну задачу на сегодня
-/post тема — написать готовый пост
-/plan — сделать план на неделю
+/today — одна задача на сегодня
+/post тема — готовый пост
+/plan — план на неделю
 /strategy — стратегия развития
-/next — выбрать следующий материал
-/status — проверить работу
-/myid — показать Telegram ID
+/next — следующий материал
+/status — состояние бота
+/myid — Telegram ID
 
-Чтобы сменить город, просто напиши:
+Чтобы сменить город, напиши:
 
 «Я теперь в Мурманске»
 
@@ -360,10 +361,7 @@ HELP_TEXT = """
 
 «Я сейчас в Нижнем Новгороде»
 
-Я запомню город и буду учитывать его дальше.
-
 Можно присылать фотографии и альбомы.
-Я выберу материал и подготовлю публикацию.
 
 Я не выдумываю факты твоей жизни
 и ничего не публикую без твоего решения.
@@ -403,6 +401,7 @@ async def guard(update: Update) -> bool:
         return True
 
     if update.effective_message:
+
         await update.effective_message.reply_text(
             "У этого бота закрытое управление."
         )
@@ -423,9 +422,7 @@ async def ensure_profile_table(
     ):
         return True
 
-    pool = context.bot_data.get(
-        DB_KEY
-    )
+    pool = context.bot_data.get(DB_KEY)
 
     if pool is None:
         return False
@@ -451,6 +448,41 @@ async def ensure_profile_table(
         return False
 
 
+async def ensure_task_history_table(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+
+    if context.bot_data.get(
+        TASK_HISTORY_TABLE_READY_KEY
+    ):
+        return True
+
+    pool = context.bot_data.get(DB_KEY)
+
+    if pool is None:
+        return False
+
+    try:
+
+        await pool.execute(
+            CREATE_TASK_HISTORY_TABLE
+        )
+
+        context.bot_data[
+            TASK_HISTORY_TABLE_READY_KEY
+        ] = True
+
+        return True
+
+    except Exception:
+
+        logger.exception(
+            "Could not create task history table"
+        )
+
+        return False
+
+
 async def set_current_city(
     context: ContextTypes.DEFAULT_TYPE,
     telegram_id: int,
@@ -468,9 +500,7 @@ async def set_current_city(
     if not ready:
         return
 
-    pool = context.bot_data.get(
-        DB_KEY
-    )
+    pool = context.bot_data.get(DB_KEY)
 
     if pool is None:
         return
@@ -521,9 +551,7 @@ async def get_current_city(
     if not ready:
         return ""
 
-    pool = context.bot_data.get(
-        DB_KEY
-    )
+    pool = context.bot_data.get(DB_KEY)
 
     if pool is None:
         return ""
@@ -554,6 +582,104 @@ async def get_current_city(
         )
 
     return ""
+
+
+async def save_today_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_id: int,
+    task_text: str,
+) -> None:
+
+    ready = await ensure_task_history_table(
+        context
+    )
+
+    if not ready:
+        return
+
+    pool = context.bot_data.get(DB_KEY)
+
+    if pool is None:
+        return
+
+    try:
+
+        await pool.execute(
+            """
+            INSERT INTO vk_manager_task_history (
+                telegram_id,
+                task_text
+            )
+            VALUES ($1, $2);
+            """,
+            telegram_id,
+            task_text,
+        )
+
+        await pool.execute(
+            """
+            DELETE FROM vk_manager_task_history
+            WHERE telegram_id = $1
+            AND id NOT IN (
+                SELECT id
+                FROM vk_manager_task_history
+                WHERE telegram_id = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT 10
+            );
+            """,
+            telegram_id,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Could not save today task"
+        )
+
+
+async def get_recent_tasks(
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_id: int,
+) -> list[str]:
+
+    ready = await ensure_task_history_table(
+        context
+    )
+
+    if not ready:
+        return []
+
+    pool = context.bot_data.get(DB_KEY)
+
+    if pool is None:
+        return []
+
+    try:
+
+        rows = await pool.fetch(
+            """
+            SELECT task_text
+            FROM vk_manager_task_history
+            WHERE telegram_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 10;
+            """,
+            telegram_id,
+        )
+
+        return [
+            str(row["task_text"])
+            for row in rows
+        ]
+
+    except Exception:
+
+        logger.exception(
+            "Could not load recent tasks"
+        )
+
+        return []
 
 
 def detect_city(
@@ -618,9 +744,7 @@ async def send_long_text(
         )
     ]
 
-    for index, part in enumerate(
-        parts
-    ):
+    for index, part in enumerate(parts):
 
         markup = (
             reply_markup
@@ -634,26 +758,19 @@ async def send_long_text(
         )
 
 
-def extract_chat_text(
-    response,
-) -> str:
+def extract_chat_text(response) -> str:
 
     if not response.choices:
         return ""
 
-    message = response.choices[
-        0
-    ].message
+    message = response.choices[0].message
 
     if message is None:
         return ""
 
     content = message.content
 
-    if isinstance(
-        content,
-        str,
-    ):
+    if isinstance(content, str):
         return content.strip()
 
     return ""
@@ -664,25 +781,21 @@ async def request_text_model(
     prompt: str,
 ) -> str:
 
-    response = (
-        await openai_client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-        )
+    response = await openai_client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
     )
 
-    return extract_chat_text(
-        response
-    )
+    return extract_chat_text(response)
 
 
 async def ai_text(
@@ -696,10 +809,7 @@ async def ai_text(
             "OPENROUTER_API_KEY is not configured"
         )
 
-    primary_model = (
-        model
-        or TEXT_MODEL
-    )
+    primary_model = model or TEXT_MODEL
 
     try:
 
@@ -723,10 +833,7 @@ async def ai_text(
             error,
         )
 
-    if (
-        primary_model
-        == FALLBACK_TEXT_MODEL
-    ):
+    if primary_model == FALLBACK_TEXT_MODEL:
 
         raise RuntimeError(
             "OpenRouter returned an empty response"
@@ -795,9 +902,7 @@ async def ai_post_from_photos(
         else "не указан"
     )
 
-    content: list[
-        dict[str, Any]
-    ] = [
+    content: list[dict[str, Any]] = [
         {
             "type": "input_text",
             "text": (
@@ -807,21 +912,19 @@ async def ai_post_from_photos(
                 + city_context
                 + ".\n\n"
                 "Не утверждай, что фотография сделана "
-                "именно в этом городе, если это не видно "
+                "в этом городе, если это не видно "
                 "и пользователь этого не написал.\n\n"
                 "Проанализируй фотографии как "
                 "контент-менеджер.\n"
                 "Если фотографий несколько — выбери "
-                "самые сильные и лучший порядок.\n"
+                "сильные кадры и лучший порядок.\n"
                 "Не придумывай обстоятельства съёмки.\n"
-                "Если материал подходит — создай один "
-                "готовый пост.\n"
-                "Если материал слабый — честно скажи, "
+                "Если материал подходит — создай "
+                "один готовый пост.\n"
+                "Если материал слабый — скажи, "
                 "что лучше доснять.\n\n"
-                "Пиши только на естественном русском языке. "
-                "Не вставляй английские слова и "
-                "не смешивай два языка.\n\n"
-                "После текста напиши коротко:\n"
+                "Пиши только на естественном русском.\n\n"
+                "После текста напиши:\n"
                 "Лучшие фото: ...\n"
                 "Почему: ...\n"
                 "Что следующим: ...\n\n"
@@ -834,15 +937,11 @@ async def ai_post_from_photos(
         }
     ]
 
-    for file_id in file_ids[
-        :10
-    ]:
+    for file_id in file_ids[:10]:
 
-        image_url = (
-            await telegram_photo_data_url(
-                context,
-                file_id,
-            )
+        image_url = await telegram_photo_data_url(
+            context,
+            file_id,
         )
 
         content.append(
@@ -852,17 +951,15 @@ async def ai_post_from_photos(
             }
         )
 
-    response = (
-        await openai_client.responses.create(
-            model=VISION_MODEL,
-            instructions=SYSTEM_PROMPT,
-            input=[
-                {
-                    "role": "user",
-                    "content": content,
-                }
-            ],
-        )
+    response = await openai_client.responses.create(
+        model=VISION_MODEL,
+        instructions=SYSTEM_PROMPT,
+        input=[
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
     )
 
     text = (
@@ -928,71 +1025,89 @@ async def build_today_task(
     if not city:
         return None
 
-    last_plan = context.user_data.get(
-        "last_plan",
-        "",
+    recent_tasks = await get_recent_tasks(
+        context,
+        telegram_id,
     )
 
-    last_draft = context.user_data.get(
-        "draft_text",
-        "",
-    )
+    history_text = ""
+
+    if recent_tasks:
+
+        history_text = (
+            "\n\nВОТ ПРЕДЫДУЩИЕ ЗАДАНИЯ.\n"
+            "Новое задание НЕ должно повторять "
+            "их сюжет, механику или набор кадров:\n\n"
+        )
+
+        for index, task in enumerate(
+            recent_tasks,
+            start=1,
+        ):
+
+            history_text += (
+                f"{index}. {task[:900]}\n\n"
+            )
 
     prompt = (
-        "Рабочий режим: ты сейчас личный "
-        "контент-менеджер и сам принимаешь решение.\n\n"
+        "Рабочий режим: ты личный контент-менеджер "
+        "и сам принимаешь решение.\n\n"
         "Подтверждённый текущий город пользователя: "
         + city
         + ".\n"
-        "Не спрашивай, где она сейчас.\n"
-        "Не спрашивай, действительно ли она там.\n\n"
+        "Не спрашивай город снова.\n\n"
         "Выбери ОДНУ конкретную задачу на сегодня "
-        "для развития её личной страницы VK.\n\n"
-        "Не предлагай три идеи.\n"
-        "Не предлагай выбор из нескольких вариантов.\n"
-        "Не заканчивай ответ вопросом.\n"
-        "Не придумывай погоду, события или планы семьи.\n"
-        "Не отправляй её обязательно в туристические места.\n"
-        "Задача должна быть выполнима обычным телефоном.\n\n"
-        "ОЧЕНЬ ВАЖНО:\n"
-        "Пиши только на нормальном русском языке.\n"
-        "Не используй английские слова.\n"
-        "Не создавай смешанные русско-английские слова.\n"
-        "Не используй профессиональный жаргон без необходимости.\n"
-        "Перед ответом проверь каждую фразу на естественность.\n\n"
-        "Ответ строго в таком формате:\n\n"
+        "для развития личной страницы VK.\n\n"
+        "Новое задание должно отличаться "
+        "от предыдущих.\n"
+        "Не повторяй один и тот же сюжет "
+        "несколько дней подряд.\n"
+        "Не скатывайся каждый раз в кофе, "
+        "окно, ноги, маршрут и селфи.\n\n"
+        "Можно выбрать другой тип материала:\n"
+        "— разговорное короткое видео;\n"
+        "— наблюдение;\n"
+        "— бытовой юмор;\n"
+        "— история из жизни;\n"
+        "— деталь двух городов;\n"
+        "— мнение автора;\n"
+        "— фотоистория;\n"
+        "— один сильный портрет;\n"
+        "— предмет или деталь с историей;\n"
+        "— вопрос аудитории;\n"
+        "— полезный личный опыт.\n\n"
+        "Не предлагай несколько вариантов.\n"
+        "Не заканчивай вопросом.\n"
+        "Не придумывай события, погоду "
+        "или планы семьи.\n"
+        "Задача должна быть выполнима телефоном.\n\n"
+        "Пиши только на естественном русском языке.\n"
+        "Не используй иностранные слова "
+        "без необходимости.\n\n"
+        "Ответ строго в формате:\n\n"
         "🎯 Сегодня\n"
-        "Одна конкретная идея в 1–2 предложениях.\n\n"
+        "Одна конкретная идея.\n\n"
         "📸 Сними\n"
-        "3–4 конкретных кадра или коротких видео.\n\n"
+        "3–4 конкретных кадра или видео.\n\n"
         "🖼 Если момент уже прошёл\n"
-        "Что конкретно поискать в галерее.\n\n"
+        "Что поискать в галерее.\n\n"
         "📤 Потом пришли мне\n"
-        "Что именно пользователь должен отправить боту.\n\n"
+        "Что именно отправить боту.\n\n"
         "💡 Зачем\n"
-        "Одна короткая причина, какую задачу развития "
-        "решает этот материал.\n\n"
+        "Одна короткая причина.\n\n"
         "После этого остановись."
+        + history_text
     )
 
-    if last_plan:
+    result = await ai_text(prompt)
 
-        prompt += (
-            "\n\nПоследний план, чтобы не повторяться:\n"
-            + last_plan[:2500]
-        )
-
-    if last_draft:
-
-        prompt += (
-            "\n\nПоследний подготовленный материал, "
-            "чтобы не повторяться:\n"
-            + last_draft[:1200]
-        )
-
-    return await ai_text(
-        prompt
+    await save_today_task(
+        context,
+        telegram_id,
+        result,
     )
+
+    return result
 
 
 async def start(
@@ -1006,15 +1121,10 @@ async def start(
     message = update.effective_message
     user = update.effective_user
 
-    if (
-        message is None
-        or user is None
-    ):
+    if message is None or user is None:
         return
 
-    pool = context.bot_data.get(
-        DB_KEY
-    )
+    pool = context.bot_data.get(DB_KEY)
 
     if pool is not None:
 
@@ -1038,6 +1148,11 @@ async def start(
         user.id,
     )
 
+    recent_tasks = await get_recent_tasks(
+        context,
+        user.id,
+    )
+
     if city:
 
         city_line = (
@@ -1049,17 +1164,22 @@ async def start(
     else:
 
         city_line = (
-            "\n\nТекущий город пока не сохранён. "
-            "Можно написать: "
-            "«Я сейчас в Нижнем Новгороде»."
+            "\n\nТекущий город пока не сохранён."
         )
+
+    memory_line = (
+        "\nПамять последних заданий: ✅"
+        if recent_tasks
+        else "\nПамять заданий готова к работе."
+    )
 
     await message.reply_text(
         "Привет! Я VK AI Manager.\n\n"
         "Я работаю как менеджер твоей личной страницы VK.\n"
-        "Я сам предлагаю следующий контент, "
+        "Я сам выбираю следующий контент, "
         "анализирую фотографии и готовлю публикации."
-        + city_line,
+        + city_line
+        + memory_line,
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -1089,10 +1209,7 @@ async def myid(
 
     user = update.effective_user
 
-    if (
-        update.effective_message
-        and user
-    ):
+    if update.effective_message and user:
 
         await update.effective_message.reply_text(
             "Твой Telegram ID: "
@@ -1155,10 +1272,7 @@ async def status_command(
     message = update.effective_message
     user = update.effective_user
 
-    if (
-        message is None
-        or user is None
-    ):
+    if message is None or user is None:
         return
 
     city = await get_current_city(
@@ -1166,11 +1280,12 @@ async def status_command(
         user.id,
     )
 
-    ai = (
-        "✅"
-        if ai_ready()
-        else "❌"
+    recent_tasks = await get_recent_tasks(
+        context,
+        user.id,
     )
+
+    ai = "✅" if ai_ready() else "❌"
 
     lock = (
         "✅"
@@ -1193,6 +1308,9 @@ async def status_command(
         + city_status
         + "\nКонцепция страницы: ✅"
         + "\nРусский язык ответов: ✅"
+        + "\nПамять заданий: "
+        + str(len(recent_tasks))
+        + "/10"
         + "\nРезервная AI-модель: ✅"
         + "\nАвтопубликация в VK: выключена"
     )
@@ -1209,10 +1327,7 @@ async def today_command(
     message = update.effective_message
     user = update.effective_user
 
-    if (
-        message is None
-        or user is None
-    ):
+    if message is None or user is None:
         return
 
     city = await get_current_city(
@@ -1230,7 +1345,8 @@ async def today_command(
         return
 
     await message.reply_text(
-        "Выбираю одну задачу на сегодня…"
+        "Проверяю предыдущие задания "
+        "и выбираю новое…"
     )
 
     try:
@@ -1276,10 +1392,7 @@ async def strategy_command(
     message = update.effective_message
     user = update.effective_user
 
-    if (
-        message is None
-        or user is None
-    ):
+    if message is None or user is None:
         return
 
     city = await get_current_city(
@@ -1296,28 +1409,23 @@ async def strategy_command(
         prompt = (
             "Составь практичную стратегию развития "
             "этой конкретной личной страницы VK "
-            "на ближайшие 30 дней.\n"
-            "Ты уже знаешь позиционирование страницы.\n"
-            "Не давай абстрактных примеров профессий.\n"
+            "на 30 дней.\n"
             "Не выдумывай события жизни.\n"
             "Дай рубрики, форматы, частоту, "
             "гипотезы роста, принципы отбора фото "
             "и план первых 7 дней.\n"
-            "Пиши только на естественном русском языке. "
-            "Не смешивай русский и английский."
+            "Пиши только естественным русским языком."
         )
 
         if city:
 
             prompt += (
-                "\nСохранённый текущий город пользователя: "
+                "\nТекущий город пользователя: "
                 + city
-                + ". Не нужно спрашивать его снова."
+                + ". Не спрашивай его снова."
             )
 
-        result = await ai_text(
-            prompt
-        )
+        result = await ai_text(prompt)
 
         await send_long_text(
             message,
@@ -1331,8 +1439,7 @@ async def strategy_command(
         )
 
         await message.reply_text(
-            "Не получилось составить стратегию. "
-            "Попробуй ещё раз чуть позже."
+            "Не получилось составить стратегию."
         )
 
 
@@ -1347,17 +1454,15 @@ async def plan_command(
     message = update.effective_message
     user = update.effective_user
 
-    if (
-        message is None
-        or user is None
-    ):
+    if message is None or user is None:
         return
 
-    topic = " ".join(
-        context.args
-    ).strip()
-
     city = await get_current_city(
+        context,
+        user.id,
+    )
+
+    recent_tasks = await get_recent_tasks(
         context,
         user.id,
     )
@@ -1369,40 +1474,38 @@ async def plan_command(
     try:
 
         prompt = (
-            "Составь практичный контент-план "
-            "на 7 дней для этой личной страницы VK.\n"
-            "Чередуй саму автора, город, семью, юмор, "
-            "личные мысли, визуальные истории "
-            "и полезный реальный опыт.\n"
+            "Составь контент-план на 7 дней "
+            "для этой личной страницы VK.\n"
             "Не выдумывай события будущей недели.\n"
-            "Формулируй идеи так, чтобы их можно было "
-            "адаптировать к реальному дню.\n"
-            "Для каждого материала укажи цель, формат, "
-            "что снять или найти в галерее "
-            "и зачем это странице.\n"
+            "Чередуй разные типы контента.\n"
+            "Не повторяй одинаковые механики.\n"
             "Можно оставить дни без публикации.\n"
-            "Пиши только на хорошем русском языке. "
-            "Не вставляй английские слова.\n"
+            "Пиши естественным русским языком."
         )
 
         if city:
 
             prompt += (
-                "\nПодтверждённый текущий город: "
+                "\nТекущий город: "
                 + city
-                + ". Не спрашивай город."
+                + "."
             )
 
-        if topic:
+        if recent_tasks:
 
             prompt += (
-                "\nДополнительная тема пользователя: "
-                + topic
+                "\n\nПоследние задания. "
+                "Не повторяй их буквально:\n"
             )
 
-        result = await ai_text(
-            prompt
-        )
+            for task in recent_tasks[:7]:
+
+                prompt += (
+                    "\n— "
+                    + task[:500]
+                )
+
+        result = await ai_text(prompt)
 
         context.user_data[
             "last_plan"
@@ -1435,10 +1538,7 @@ async def next_command(
     message = update.effective_message
     user = update.effective_user
 
-    if (
-        message is None
-        or user is None
-    ):
+    if message is None or user is None:
         return
 
     city = await get_current_city(
@@ -1446,54 +1546,46 @@ async def next_command(
         user.id,
     )
 
-    last_plan = context.user_data.get(
-        "last_plan",
-        "",
-    )
-
-    last_draft = context.user_data.get(
-        "draft_text",
-        "",
+    recent_tasks = await get_recent_tasks(
+        context,
+        user.id,
     )
 
     prompt = (
-        "Как личный контент-менеджер выбери "
-        "ОДИН лучший следующий материал для страницы.\n"
+        "Выбери ОДИН лучший следующий материал "
+        "для личной страницы VK.\n"
         "Не давай меню вариантов.\n"
         "Не выдумывай события.\n"
+        "Не повторяй последние задания.\n"
         "Дай цель, формат, что снять или найти "
-        "в галерее и зачем это нужно сейчас.\n"
-        "Пиши только на естественном русском языке. "
-        "Не смешивай русский и английский."
+        "в галерее и зачем это нужно.\n"
+        "Пиши естественным русским языком."
     )
 
     if city:
 
         prompt += (
-            "\nПодтверждённый текущий город: "
+            "\nТекущий город: "
             + city
-            + ". Не спрашивай его снова."
+            + "."
         )
 
-    if last_plan:
+    if recent_tasks:
 
         prompt += (
-            "\nПоследний план:\n"
-            + last_plan[:3000]
+            "\n\nПоследние задания:\n"
         )
 
-    if last_draft:
+        for task in recent_tasks[:5]:
 
-        prompt += (
-            "\nПоследний материал:\n"
-            + last_draft[:1500]
-        )
+            prompt += (
+                "\n— "
+                + task[:500]
+            )
 
     try:
 
-        result = await ai_text(
-            prompt
-        )
+        result = await ai_text(prompt)
 
         await send_long_text(
             message,
@@ -1522,10 +1614,7 @@ async def post_command(
     message = update.effective_message
     user = update.effective_user
 
-    if (
-        message is None
-        or user is None
-    ):
+    if message is None or user is None:
         return
 
     topic = " ".join(
@@ -1554,30 +1643,24 @@ async def post_command(
     try:
 
         prompt = (
-            "Создай один готовый пост для этой "
-            "личной страницы ВКонтакте.\n"
+            "Создай один готовый пост "
+            "для личной страницы ВКонтакте.\n"
             "Тема пользователя: "
             + topic
             + ".\n"
-            "Не придумывай факты, которых пользователь "
-            "не сообщил.\n"
-            "Пиши живым естественным русским языком. "
-            "Не используй английские слова, если есть "
-            "обычный русский вариант."
+            "Не придумывай факты.\n"
+            "Пиши естественным русским языком."
         )
 
         if city:
 
             prompt += (
-                "\nТекущий сохранённый город: "
+                "\nТекущий город: "
                 + city
-                + ". Используй это только там, "
-                "где это уместно."
+                + ". Используй только если уместно."
             )
 
-        text = await ai_text(
-            prompt
-        )
+        text = await ai_text(prompt)
 
         save_draft(
             context,
@@ -1623,9 +1706,7 @@ async def draft_callback(
         )
 
         await query.message.reply_text(
-            "✅ Оставила как готовый черновик.\n"
-            "Теперь можно нажать "
-            "«Что публиковать дальше»."
+            "✅ Оставила как готовый черновик."
         )
 
         return
@@ -1648,12 +1729,10 @@ async def draft_callback(
         try:
 
             new_text = await ai_text(
-                "Переделай этот пост для нашей "
-                "личной страницы VK.\n"
-                "Сделай естественнее и живее.\n"
+                "Переделай этот пост.\n"
+                "Сделай естественнее.\n"
                 "Не добавляй новых фактов.\n"
-                "Пиши только на хорошем русском языке. "
-                "Не смешивай русский и английский.\n\n"
+                "Пиши только по-русски.\n\n"
                 + old_text
             )
 
@@ -1703,9 +1782,7 @@ async def text_message(
 
     text = message.text.strip()
 
-    detected_city = detect_city(
-        text
-    )
+    detected_city = detect_city(text)
 
     if detected_city:
 
@@ -1713,6 +1790,13 @@ async def text_message(
             context,
             user.id,
             detected_city,
+        )
+
+        normalized = (
+            text
+            .lower()
+            .replace("ё", "е")
+            .strip()
         )
 
         short_city_messages = {
@@ -1731,13 +1815,6 @@ async def text_message(
             "я сейчас в мурманске",
         }
 
-        normalized = (
-            text
-            .lower()
-            .replace("ё", "е")
-            .strip()
-        )
-
         if (
             normalized in short_city_messages
             or len(text) < 60
@@ -1747,7 +1824,8 @@ async def text_message(
                 "Запомнила: сейчас ты в "
                 + city_in_phrase(detected_city)
                 + ".\n\n"
-                "Сразу выбираю одну задачу на сегодня…"
+                "Проверяю предыдущие задания "
+                "и выбираю новое…"
             )
 
             try:
@@ -1771,8 +1849,8 @@ async def text_message(
                 )
 
                 await message.reply_text(
-                    "Город сохранила, но сейчас "
-                    "не получилось подготовить задачу."
+                    "Город сохранила, "
+                    "но не получилось подготовить задачу."
                 )
 
             return
@@ -1784,25 +1862,21 @@ async def text_message(
 
     prompt = (
         text
-        + "\n\nОтвечай только на естественном русском языке. "
-        "Не вставляй английские слова и не создавай "
-        "смешанные русско-английские слова."
+        + "\n\nОтвечай только естественным "
+        "русским языком."
     )
 
     if current_city:
 
         prompt += (
-            "\n\nСлужебный контекст менеджера: "
-            "подтверждённый текущий город пользователя — "
+            "\nТекущий подтверждённый город пользователя: "
             + current_city
-            + ". Не спрашивай город повторно."
+            + ". Не спрашивай его снова."
         )
 
     try:
 
-        response = await ai_text(
-            prompt
-        )
+        response = await ai_text(prompt)
 
         await send_long_text(
             message,
@@ -1816,8 +1890,7 @@ async def text_message(
         )
 
         await message.reply_text(
-            "Не удалось получить ответ от ИИ. "
-            "Попробуй ещё раз."
+            "Не удалось получить ответ от ИИ."
         )
 
 
@@ -1830,9 +1903,7 @@ async def process_album_after_delay(
 
     try:
 
-        await asyncio.sleep(
-            2.5
-        )
+        await asyncio.sleep(2.5)
 
         group = PHOTO_GROUPS.pop(
             media_group_id,
@@ -1842,19 +1913,12 @@ async def process_album_after_delay(
         if not group:
             return
 
-        file_ids = group[
-            "file_ids"
-        ]
-
-        message = group[
-            "message"
-        ]
-
+        file_ids = group["file_ids"]
+        message = group["message"]
         caption = group.get(
             "caption",
             "",
         )
-
         user_id = group.get(
             "user_id"
         )
@@ -1934,18 +1998,9 @@ async def photo_message(
     ):
         return
 
-    file_id = (
-        message.photo[-1].file_id
-    )
-
-    caption = (
-        message.caption
-        or ""
-    )
-
-    media_group_id = (
-        message.media_group_id
-    )
+    file_id = message.photo[-1].file_id
+    caption = message.caption or ""
+    media_group_id = message.media_group_id
 
     if media_group_id:
 
@@ -1960,29 +2015,18 @@ async def photo_message(
             },
         )
 
-        group[
-            "file_ids"
-        ].append(
+        group["file_ids"].append(
             file_id
         )
 
-        group[
-            "message"
-        ] = message
-
-        group[
-            "user_id"
-        ] = user.id
+        group["message"] = message
+        group["user_id"] = user.id
 
         if caption:
 
-            group[
-                "caption"
-            ] = caption
+            group["caption"] = caption
 
-        old_task = group.get(
-            "task"
-        )
+        old_task = group.get("task")
 
         if (
             old_task
@@ -1991,12 +2035,12 @@ async def photo_message(
 
             old_task.cancel()
 
-        group[
-            "task"
-        ] = context.application.create_task(
-            process_album_after_delay(
-                media_group_id,
-                context,
+        group["task"] = (
+            context.application.create_task(
+                process_album_after_delay(
+                    media_group_id,
+                    context,
+                )
             )
         )
 
