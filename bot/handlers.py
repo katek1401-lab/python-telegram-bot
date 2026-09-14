@@ -41,6 +41,8 @@ TEXT_MODEL = os.getenv(
     "nvidia/nemotron-3-ultra-550b-a55b:free",
 ).strip()
 
+FALLBACK_TEXT_MODEL = "openrouter/free"
+
 VISION_MODEL = os.getenv(
     "OPENROUTER_VISION_MODEL",
     "openrouter/free",
@@ -55,6 +57,7 @@ ADMIN_TELEGRAM_ID = os.getenv(
 openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY or "missing-key",
     base_url="https://openrouter.ai/api/v1",
+    timeout=60.0,
 )
 
 
@@ -218,8 +221,8 @@ async def send_long_text(
         return
 
     parts = [
-        text[i:i + 4000]
-        for i in range(0, len(text), 4000)
+        text[i:i + 3900]
+        for i in range(0, len(text), 3900)
     ]
 
     for index, part in enumerate(parts):
@@ -236,18 +239,31 @@ async def send_long_text(
         )
 
 
-async def ai_text(
+def extract_chat_text(response) -> str:
+
+    if not response.choices:
+        return ""
+
+    message = response.choices[0].message
+
+    if message is None:
+        return ""
+
+    content = message.content
+
+    if isinstance(content, str):
+        return content.strip()
+
+    return ""
+
+
+async def request_text_model(
+    model: str,
     prompt: str,
-    model: str | None = None,
 ) -> str:
 
-    if not ai_ready():
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is not configured"
-        )
-
     response = await openai_client.chat.completions.create(
-        model=model or TEXT_MODEL,
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -260,22 +276,73 @@ async def ai_text(
         ],
     )
 
-    if not response.choices:
+    return extract_chat_text(response)
+
+
+async def ai_text(
+    prompt: str,
+    model: str | None = None,
+) -> str:
+
+    if not ai_ready():
         raise RuntimeError(
-            "OpenRouter returned no choices"
+            "OPENROUTER_API_KEY is not configured"
         )
 
-    text = (
-        response.choices[0].message.content
-        or ""
-    )
+    primary_model = model or TEXT_MODEL
 
-    if not text.strip():
+    try:
+
+        text = await request_text_model(
+            primary_model,
+            prompt,
+        )
+
+        if text:
+            return text
+
+        logger.warning(
+            "Primary model returned empty response: %s",
+            primary_model,
+        )
+
+    except Exception as error:
+
+        logger.warning(
+            "Primary model failed: %s",
+            error,
+        )
+
+    if primary_model == FALLBACK_TEXT_MODEL:
         raise RuntimeError(
             "OpenRouter returned an empty response"
         )
 
-    return text.strip()
+    try:
+
+        logger.info(
+            "Trying fallback model: %s",
+            FALLBACK_TEXT_MODEL,
+        )
+
+        text = await request_text_model(
+            FALLBACK_TEXT_MODEL,
+            prompt,
+        )
+
+        if text:
+            return text
+
+    except Exception as error:
+
+        logger.warning(
+            "Fallback model failed: %s",
+            error,
+        )
+
+    raise RuntimeError(
+        "OpenRouter primary and fallback models failed"
+    )
 
 
 async def telegram_photo_data_url(
@@ -564,8 +631,9 @@ async def status_command(
         + "\nЗакрытый доступ: "
         + lock
         + "\n\n"
-        "Публикация на личную страницу VK "
-        "пока остаётся с твоим подтверждением."
+        "Если основная бесплатная модель "
+        "недоступна, бот автоматически "
+        "попробует резервную."
     )
 
 
@@ -613,7 +681,10 @@ async def strategy_command(
         )
 
         await message.reply_text(
-            "Не получилось составить стратегию."
+            "Не получилось составить стратегию. "
+            "Обе бесплатные модели сейчас "
+            "не дали нормальный ответ. "
+            "Попробуй ещё раз чуть позже."
         )
 
 
@@ -940,6 +1011,8 @@ async def process_album_after_delay(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
 
+    message = None
+
     try:
 
         await asyncio.sleep(
@@ -1004,12 +1077,17 @@ async def process_album_after_delay(
             "Album processing failed"
         )
 
-        try:
-            await message.reply_text(
-                "Не удалось обработать альбом."
-            )
-        except Exception:
-            pass
+        if message is not None:
+
+            try:
+
+                await message.reply_text(
+                    "Не удалось обработать альбом."
+                )
+
+            except Exception:
+
+                pass
 
 
 async def photo_message(
