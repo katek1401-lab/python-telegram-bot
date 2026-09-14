@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 DB_KEY = "db"
 REDIS_KEY = "redis"
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_API_KEY = os.getenv(
+    "OPENROUTER_API_KEY",
+    "",
+).strip()
 
 TEXT_MODEL = os.getenv(
     "OPENROUTER_TEXT_MODEL",
@@ -200,6 +203,39 @@ def ai_ready() -> bool:
     return bool(OPENROUTER_API_KEY)
 
 
+async def send_long_text(
+    message,
+    text: str,
+    reply_markup=None,
+) -> None:
+
+    text = (text or "").strip()
+
+    if not text:
+        await message.reply_text(
+            "ИИ вернул пустой ответ. Попробуй ещё раз."
+        )
+        return
+
+    parts = [
+        text[i:i + 4000]
+        for i in range(0, len(text), 4000)
+    ]
+
+    for index, part in enumerate(parts):
+
+        markup = (
+            reply_markup
+            if index == len(parts) - 1
+            else None
+        )
+
+        await message.reply_text(
+            part,
+            reply_markup=markup,
+        )
+
+
 async def ai_text(
     prompt: str,
     model: str | None = None,
@@ -229,7 +265,10 @@ async def ai_text(
             "OpenRouter returned no choices"
         )
 
-    text = response.choices[0].message.content or ""
+    text = (
+        response.choices[0].message.content
+        or ""
+    )
 
     if not text.strip():
         raise RuntimeError(
@@ -314,9 +353,17 @@ async def ai_post_from_photos(
         ],
     )
 
-    return (
-        response.output_text or ""
+    text = (
+        response.output_text
+        or ""
     ).strip()
+
+    if not text:
+        raise RuntimeError(
+            "Vision model returned an empty response"
+        )
+
+    return text
 
 
 def save_draft(
@@ -410,8 +457,9 @@ async def help_command(
 
     if update.effective_message:
 
-        await update.effective_message.reply_text(
-            HELP_TEXT
+        await send_long_text(
+            update.effective_message,
+            HELP_TEXT,
         )
 
 
@@ -553,8 +601,9 @@ async def strategy_command(
             "Не обещай гарантированный рост."
         )
 
-        await message.reply_text(
-            result
+        await send_long_text(
+            message,
+            result,
         )
 
     except Exception:
@@ -615,8 +664,9 @@ async def plan_command(
             "last_plan"
         ] = result
 
-        await message.reply_text(
-            result
+        await send_long_text(
+            message,
+            result,
         )
 
     except Exception:
@@ -682,8 +732,9 @@ async def next_command(
             prompt
         )
 
-        await message.reply_text(
-            result
+        await send_long_text(
+            message,
+            result,
         )
 
     except Exception:
@@ -746,7 +797,8 @@ async def post_command(
             text,
         )
 
-        await message.reply_text(
+        await send_long_text(
+            message,
             text,
             reply_markup=draft_keyboard(),
         )
@@ -827,7 +879,8 @@ async def draft_callback(
                 ),
             )
 
-            await query.message.reply_text(
+            await send_long_text(
+                query.message,
                 new_text,
                 reply_markup=draft_keyboard(),
             )
@@ -865,8 +918,9 @@ async def text_message(
             message.text
         )
 
-        await message.reply_text(
-            response
+        await send_long_text(
+            message,
+            response,
         )
 
     except Exception:
@@ -934,7 +988,8 @@ async def process_album_after_delay(
             file_ids,
         )
 
-        await message.reply_text(
+        await send_long_text(
+            message,
             text,
             reply_markup=draft_keyboard(),
         )
@@ -948,6 +1003,13 @@ async def process_album_after_delay(
         logger.exception(
             "Album processing failed"
         )
+
+        try:
+            await message.reply_text(
+                "Не удалось обработать альбом."
+            )
+        except Exception:
+            pass
 
 
 async def photo_message(
@@ -1042,7 +1104,8 @@ async def photo_message(
             [file_id],
         )
 
-        await message.reply_text(
+        await send_long_text(
+            message,
             text,
             reply_markup=draft_keyboard(),
         )
