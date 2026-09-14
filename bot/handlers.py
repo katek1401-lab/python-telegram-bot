@@ -1,889 +1,242 @@
-"""Telegram handlers for VK AI Manager."""
-
 import asyncio
 import base64
+import io
 import logging
 import os
 import re
-from typing import Any
+from typing import Optional
 
+import av
 from openai import AsyncOpenAI
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    Update,
-)
-from telegram.error import Conflict, NetworkError, TimedOut
+from telegram import BotCommand, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
+    CallbackContext,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
-from bot import cache, db
-
-
-logger = logging.getLogger(__name__)
-
+# Эти имена использует main.py — не удалять
 DB_KEY = "db"
 REDIS_KEY = "redis"
 
-PROFILE_TABLE_READY_KEY = "profile_state_table_ready"
-TASK_HISTORY_TABLE_READY_KEY = "task_history_table_ready"
+logger = logging.getLogger(__name__)
 
-OPENROUTER_API_KEY = os.getenv(
-    "OPENROUTER_API_KEY",
-    "",
-).strip()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "").strip()
 
-TEXT_MODEL = os.getenv(
-    "OPENROUTER_TEXT_MODEL",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-).strip()
-
-FALLBACK_TEXT_MODEL = "openrouter/free"
-
-VISION_MODEL = os.getenv(
-    "OPENROUTER_VISION_MODEL",
-    "openrouter/free",
-).strip()
-
-VIDEO_MODEL = os.getenv(
-    "OPENROUTER_VIDEO_MODEL",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-).strip()
-
-ADMIN_TELEGRAM_ID = os.getenv(
-    "ADMIN_TELEGRAM_ID",
-    "",
-).strip()
+TEXT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+TEXT_FALLBACK_MODEL = "openrouter/free"
+VISION_MODEL = "openrouter/free"
 
 MAX_VIDEO_BYTES = 18 * 1024 * 1024
-
+MAX_VIDEO_FRAMES = 6
 
 openai_client = AsyncOpenAI(
-    api_key=OPENROUTER_API_KEY or "missing-key",
+    api_key=OPENROUTER_API_KEY,
     base_url="https://openrouter.ai/api/v1",
-    timeout=90.0,
 )
 
-
-BOT_COMMANDS = (
-    ("start", "Главное меню"),
-    ("today", "Что делать сегодня"),
-    ("post", "Создать пост"),
-    ("plan", "План на 7 дней"),
-    ("strategy", "Стратегия роста"),
-    ("next", "Что публиковать дальше"),
-    ("status", "Проверить подключения"),
-    ("myid", "Показать мой Telegram ID"),
-    ("help", "Что умеет бот"),
-    ("ping", "Проверить бота"),
-)
-
-
-MENU_TODAY = "Что делать сегодня"
-MENU_PLAN = "План на неделю"
-MENU_NEXT = "Что публиковать дальше"
-MENU_STRATEGY = "Стратегия роста"
-
-
-MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [MENU_TODAY],
-        [MENU_PLAN, MENU_NEXT],
-        [MENU_STRATEGY],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-    input_field_placeholder="Напиши задачу для VK AI Manager",
-)
-
-
-CREATE_PROFILE_STATE_TABLE = """
-CREATE TABLE IF NOT EXISTS vk_manager_profile_state (
-    telegram_id BIGINT PRIMARY KEY,
-    current_city TEXT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-
-CREATE_TASK_HISTORY_TABLE = """
-CREATE TABLE IF NOT EXISTS vk_manager_task_history (
-    id BIGSERIAL PRIMARY KEY,
-    telegram_id BIGINT NOT NULL,
-    task_text TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
+PHOTO_GROUPS = {}
 
 
 SYSTEM_PROMPT = """
-Ты — VK AI Manager, личный AI-контент-менеджер пользователя.
+Ты — персональный контент-менеджер и AI-редактор страницы пользователя во ВКонтакте.
 
-Это личный авторский блог женщины и мамы,
-жизнь которой связана с Мурманском и Нижним Новгородом.
-
-Главная идея:
+Концепция блога:
 «Живая жизнь между двумя городами».
 
-Это НЕ типичный мамский блог.
+Это авторский блог женщины, чья жизнь связана с Мурманском и Нижним Новгородом.
 
-Главный герой страницы — сама автор.
+ВАЖНО:
+Это не типичный «мамский блог».
+Главный герой блога — сама женщина: её жизнь, настроение, характер,
+мысли, выбор, привычки, поездки, дом, города и настоящие моменты.
 
-Дети, семья, поездки, материнство и быт —
-естественная часть жизни,
-но не единственная тема.
+Дети, семья, материнство, поездки и бытовые события — естественная часть
+жизни, но не единственная тема.
 
-ЦЕЛЬ
+Основные направления:
+— жизнь между двумя городами;
+— различия городов, климата, ритма и ощущения дома;
+— настоящая повседневная жизнь;
+— материнство как часть жизни;
+— мысли автора;
+— настроение и характер;
+— тёплые семейные моменты;
+— бытовой юмор;
+— дорога, сборы и поездки;
+— обычные красивые моменты;
+— полезный контент только из настоящего опыта;
+— реальные фотографии и видео.
 
-Органически развивать личную страницу ВКонтакте:
+Цель:
+органический рост страницы ВКонтакте:
+охваты, вовлечённость, узнаваемость и заинтересованные подписчики.
 
-— увеличивать охваты;
-— повышать вовлечённость;
-— усиливать узнаваемость;
-— формировать интерес к личности автора;
-— постепенно увеличивать заинтересованную аудиторию.
+НИКОГДА НЕ ВЫДУМЫВАЙ ФАКТЫ.
 
-Ты работаешь как инициативный контент-менеджер,
-а не просто как генератор текста.
-
-ЯЗЫК
-
-Всегда отвечай на хорошем естественном русском языке.
-
-Не смешивай русский и английский.
-
-Не создавай гибридные или сломанные слова.
-
-Перед отправкой ответа проверь:
-
-1. Нет ли случайных иностранных слов.
-2. Нет ли сломанных слов.
-3. Звучит ли ответ естественно.
-4. Нет ли лишнего профессионального жаргона.
-
-НЕ ВЫДУМЫВАЙ ФАКТЫ
-
-Нельзя самостоятельно придумывать:
-
-— цены;
-— суммы;
-— покупки;
-— даты;
+Нельзя придумывать:
+— цены и суммы;
+— профессию;
 — возраст детей;
-— имена;
-— профессии;
-— медицинские факты;
-— семейные проблемы;
+— имена детей;
+— покупки;
 — конкретные события;
-— места посещения;
-— цитаты детей;
-— планы семьи;
+— места, которых пользователь не называл;
 — длительность поездок;
-— погоду;
-— то, где пользователь находится.
+— даты;
+— цитаты детей;
+— семейные проблемы;
+— медицинские факты;
+— рабочие ситуации;
+— истории, которых пользователь не рассказывал.
 
-Если текущий город передан как сохранённый,
-считай его подтверждённым фактом.
+Если какой-то факт неизвестен:
+— убери его;
+— предложи как идею;
+— либо задай один короткий вопрос.
 
-Не спрашивай город повторно.
+При анализе фото и видео:
+описывай только то, что действительно видно.
+Не определяй личности людей.
+Не делай чувствительных предположений.
 
-КОНТЕНТ
+Действуй не только как копирайтер, но и как контент-менеджер.
 
-Если пользователь спрашивает:
-«Что делать сегодня?»,
-выбери ОДНУ лучшую задачу.
+Ты можешь советовать:
+— что снять сегодня;
+— что сфотографировать;
+— какое видео снять;
+— какой старый материал поискать в галерее;
+— какой формат выбрать;
+— что публиковать следующим;
+— почему конкретный материал полезен для роста.
 
-Не выдавай меню вариантов.
+Следи за разнообразием.
 
-Не предлагай несколько идей на выбор.
-
-РАЗНООБРАЗИЕ
-
-Если тебе переданы предыдущие задания,
-не повторяй их центральную механику.
-
-Особенно не повторяй слишком часто:
-
-— кофе;
-— чашку;
-— вид из окна;
-— ноги;
-— шаги;
-— обычный маршрут;
-— прогулку;
-— селфи;
-— отражение;
-— тень;
-— дверь;
-— подъезд;
-— туристическую достопримечательность просто как фон.
-
-Ищи новый угол.
-
-Чередуй:
-
-— саму автора;
-— её мнение;
-— городской контекст;
+В контенте должны чередоваться:
+— сама автор;
 — два города;
-— семью;
+— семья и дети;
 — бытовой юмор;
 — личные мысли;
-— детали с историей;
-— полезный реальный опыт;
-— фотоистории;
+— визуальные истории;
+— настоящий полезный опыт;
+— вовлекающие публикации;
 — короткие видео;
-— вовлекающие темы.
+— фотоподборки.
 
-ФОТО И ВИДЕО
+Не публикуй что-то только ради частоты.
+Иногда отсутствие публикации лучше слабого поста.
 
-Анализируй только то,
-что действительно видно или слышно.
+Если создаёшь готовый пост, структура:
+1. Сильное естественное начало.
+2. Живой основной текст.
+3. Призыв к реакции только если он уместен.
+4. От 0 до 5 действительно нужных хэштегов.
+5. В конце отдельной строкой:
+«Зачем этот пост: ...»
 
-Учитывай подпись пользователя.
-
-Не устанавливай личности людей.
-
-Не делай чувствительных выводов.
-
-Не придумывай обстоятельства съёмки.
-
-Если речь в видео слышна плохо —
-скажи об этом прямо.
-
-Не придумывай расшифровку речи.
-
-Для видео оцени:
-
-— есть ли сильный материал;
-— что происходит;
-— какой фрагмент лучше;
-— что убрать;
-— что сократить;
-— подходит ли материал для клипа;
-— подходит ли материал для обычного поста;
-— нужен ли текст;
-— нужен ли голос;
-— нужны ли титры;
-— зачем этот материал странице.
-
-ТОН
-
-Пиши живо, умно, современно и тепло.
-
+Стиль:
+русский язык.
+Тёплый, умный, современный, естественный.
 Без пафоса.
-Без рекламного канцелярита.
+Без корпоративного стиля.
+Без фальшивой мотивации.
+Без рекламной интонации.
+Без клише «идеальной мамы».
+Без выдуманной драмы.
 Без пустого кликбейта.
-Без спама.
-Без накрутки.
 
-Не обещай гарантированный рост.
+Не давай десять одинаковых вариантов.
+Лучше один сильный вариант.
 
-Ничего не публикуй автоматически.
+Если вопрос необходим — максимум один короткий вопрос.
 
-Финальное решение всегда принимает пользователь.
-""".strip()
+Не обещай гарантированного роста.
 
+Не утверждай, что публикация уже сделана.
+Без подтверждения пользователя ничего не публикуется.
 
-HELP_TEXT = """
-Я — VK AI Manager.
-
-Я умею:
-
-— помнить текущий город;
-— помнить последние задания;
-— выбирать одну задачу на сегодня;
-— составлять планы;
-— писать посты;
-— анализировать фотографии;
-— анализировать короткие видео;
-— советовать, что оставить и что убрать.
-
-Команды:
-
-/today — одна задача на сегодня
-/post тема — готовый пост
-/plan — план на неделю
-/strategy — стратегия развития
-/next — следующий материал
-/status — состояние бота
-/myid — Telegram ID
-
-Чтобы сменить город, напиши:
-
-«Я теперь в Мурманске»
-
-или
-
-«Я сейчас в Нижнем Новгороде».
-
-Можно присылать фото и короткие видео.
-
-Ничего не публикуется без твоего решения.
-""".strip()
+ОЧЕНЬ ВАЖНО:
+отвечай только на нормальном русском языке.
+Не используй без необходимости английские слова.
+Не смешивай русский и английский.
+Перед отправкой проверь ответ на случайные английские или поломанные слова.
+"""
 
 
-PHOTO_GROUPS: dict[str, dict[str, Any]] = {}
+def main_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("Что делать сегодня")],
+            [KeyboardButton("План на неделю")],
+            [KeyboardButton("Что публиковать дальше")],
+            [KeyboardButton("Стратегия роста")],
+        ],
+        resize_keyboard=True,
+    )
 
 
-def city_in_phrase(city: str) -> str:
-
-    if city == "Нижний Новгород":
-        return "Нижнем Новгороде"
-
-    if city == "Мурманск":
-        return "Мурманске"
-
-    return city
-
-
-def is_allowed(update: Update) -> bool:
-
+def user_allowed(update: Update) -> bool:
     if not ADMIN_TELEGRAM_ID:
         return True
 
     user = update.effective_user
-
-    return bool(
-        user
-        and str(user.id) == ADMIN_TELEGRAM_ID
-    )
-
-
-async def guard(update: Update) -> bool:
-
-    if is_allowed(update):
-        return True
-
-    if update.effective_message:
-
-        await update.effective_message.reply_text(
-            "У этого бота закрытое управление."
-        )
-
-    return False
-
-
-def ai_ready() -> bool:
-
-    return bool(
-        OPENROUTER_API_KEY
-    )
-
-
-async def ensure_profile_table(
-    context: ContextTypes.DEFAULT_TYPE,
-) -> bool:
-
-    if context.bot_data.get(
-        PROFILE_TABLE_READY_KEY
-    ):
-        return True
-
-    pool = context.bot_data.get(
-        DB_KEY
-    )
-
-    if pool is None:
+    if not user:
         return False
 
-    try:
+    return str(user.id) == ADMIN_TELEGRAM_ID
 
-        await pool.execute(
-            CREATE_PROFILE_STATE_TABLE
-        )
 
-        context.bot_data[
-            PROFILE_TABLE_READY_KEY
-        ] = True
+async def send_long_text(message, text: str):
+    text = text or "Не получилось получить ответ."
 
-        return True
+    max_len = 3900
 
-    except Exception:
+    while len(text) > max_len:
+        split_at = text.rfind("\n", 0, max_len)
 
-        logger.exception(
-            "Could not create profile state table"
-        )
+        if split_at < 1000:
+            split_at = max_len
 
-        return False
+        part = text[:split_at].strip()
+        text = text[split_at:].strip()
 
+        await message.reply_text(part)
 
-async def ensure_task_history_table(
-    context: ContextTypes.DEFAULT_TYPE,
-) -> bool:
+    if text:
+        await message.reply_text(text)
 
-    if context.bot_data.get(
-        TASK_HISTORY_TABLE_READY_KEY
-    ):
-        return True
 
-    pool = context.bot_data.get(
-        DB_KEY
-    )
-
-    if pool is None:
-        return False
-
-    try:
-
-        await pool.execute(
-            CREATE_TASK_HISTORY_TABLE
-        )
-
-        context.bot_data[
-            TASK_HISTORY_TABLE_READY_KEY
-        ] = True
-
-        return True
-
-    except Exception:
-
-        logger.exception(
-            "Could not create task history table"
-        )
-
-        return False
-
-
-async def set_current_city(
-    context: ContextTypes.DEFAULT_TYPE,
-    telegram_id: int,
-    city: str,
-) -> None:
-
-    context.user_data[
-        "current_city"
-    ] = city
-
-    if not await ensure_profile_table(
-        context
-    ):
-        return
-
-    pool = context.bot_data.get(
-        DB_KEY
-    )
-
-    if pool is None:
-        return
-
-    try:
-
-        await pool.execute(
-            """
-            INSERT INTO vk_manager_profile_state (
-                telegram_id,
-                current_city,
-                updated_at
-            )
-            VALUES ($1, $2, now())
-            ON CONFLICT (telegram_id)
-            DO UPDATE SET
-                current_city = EXCLUDED.current_city,
-                updated_at = now();
-            """,
-            telegram_id,
-            city,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Could not save current city"
-        )
-
-
-async def get_current_city(
-    context: ContextTypes.DEFAULT_TYPE,
-    telegram_id: int,
-) -> str:
-
-    cached = context.user_data.get(
-        "current_city",
-        "",
-    )
-
-    if cached:
-        return str(cached)
-
-    if not await ensure_profile_table(
-        context
-    ):
-        return ""
-
-    pool = context.bot_data.get(
-        DB_KEY
-    )
-
-    if pool is None:
-        return ""
-
-    try:
-
-        city = await pool.fetchval(
-            """
-            SELECT current_city
-            FROM vk_manager_profile_state
-            WHERE telegram_id = $1;
-            """,
-            telegram_id,
-        )
-
-        if city:
-
-            context.user_data[
-                "current_city"
-            ] = city
-
-            return str(city)
-
-    except Exception:
-
-        logger.exception(
-            "Could not load current city"
-        )
-
-    return ""
-
-
-async def save_today_task(
-    context: ContextTypes.DEFAULT_TYPE,
-    telegram_id: int,
-    task_text: str,
-) -> None:
-
-    if not await ensure_task_history_table(
-        context
-    ):
-        return
-
-    pool = context.bot_data.get(
-        DB_KEY
-    )
-
-    if pool is None:
-        return
-
-    try:
-
-        await pool.execute(
-            """
-            INSERT INTO vk_manager_task_history (
-                telegram_id,
-                task_text
-            )
-            VALUES ($1, $2);
-            """,
-            telegram_id,
-            task_text,
-        )
-
-        await pool.execute(
-            """
-            DELETE FROM vk_manager_task_history
-            WHERE telegram_id = $1
-            AND id NOT IN (
-                SELECT id
-                FROM vk_manager_task_history
-                WHERE telegram_id = $1
-                ORDER BY created_at DESC, id DESC
-                LIMIT 10
-            );
-            """,
-            telegram_id,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Could not save today task"
-        )
-
-
-async def get_recent_tasks(
-    context: ContextTypes.DEFAULT_TYPE,
-    telegram_id: int,
-) -> list[str]:
-
-    if not await ensure_task_history_table(
-        context
-    ):
-        return []
-
-    pool = context.bot_data.get(
-        DB_KEY
-    )
-
-    if pool is None:
-        return []
-
-    try:
-
-        rows = await pool.fetch(
-            """
-            SELECT task_text
-            FROM vk_manager_task_history
-            WHERE telegram_id = $1
-            ORDER BY created_at DESC, id DESC
-            LIMIT 10;
-            """,
-            telegram_id,
-        )
-
-        return [
-            str(row["task_text"])
-            for row in rows
-        ]
-
-    except Exception:
-
-        logger.exception(
-            "Could not load recent tasks"
-        )
-
-        return []
-
-
-def detect_city(
-    text: str,
-) -> str | None:
-
-    normalized = (
-        text
-        .lower()
-        .replace("ё", "е")
-        .strip()
-    )
-
-    if "мурманск" in normalized:
-        return "Мурманск"
-
-    if (
-        "нижн" in normalized
-        and "новгород" in normalized
-    ):
-        return "Нижний Новгород"
-
-    if normalized in {
-        "нижний",
-        "в нижнем",
-        "я в нижнем",
-        "сейчас в нижнем",
-        "я сейчас в нижнем",
-    }:
-        return "Нижний Новгород"
-
-    return None
-
-
-def is_location_statement(
-    text: str,
-) -> bool:
-
-    normalized = (
-        text
-        .lower()
-        .replace("ё", "е")
-        .strip(" .,!?:;")
-    )
-
-    if normalized in {
-        "мурманск",
-        "в мурманске",
-        "нижний",
-        "в нижнем",
-        "нижний новгород",
-        "в нижнем новгороде",
-    }:
-        return True
-
-    phrases = (
-        "я сейчас в ",
-        "сейчас я в ",
-        "я в ",
-        "нахожусь в ",
-        "я теперь в ",
-        "теперь я в ",
-        "сегодня я в ",
-        "приехала в ",
-        "вернулась в ",
-    )
-
-    return any(
-        phrase in normalized
-        for phrase in phrases
-    )
-
-
-def recent_repeat_signals(
-    tasks: list[str],
-) -> list[str]:
-
-    if not tasks:
-        return []
-
-    joined = (
-        " ".join(tasks)
-        .lower()
-        .replace("ё", "е")
-    )
-
-    groups = {
-        "кофе или чашка": (
-            "кофе",
-            "чашк",
-        ),
-        "вид из окна": (
-            "окн",
-        ),
-        "селфи": (
-            "селфи",
-        ),
-        "ноги или шаги": (
-            "ног",
-            "шаг",
-        ),
-        "маршрут или прогулка": (
-            "маршрут",
-            "прогул",
-        ),
-        "отражение или тень": (
-            "отражен",
-            "тень",
-        ),
-        "дверь или подъезд": (
-            "двер",
-            "подъезд",
-        ),
-        "туристическая точка как фон": (
-            "кремл",
-            "чкалов",
-            "набережн",
-            "достопримеч",
-        ),
-    }
-
-    signals = []
-
-    for label, stems in groups.items():
-
-        if any(
-            stem in joined
-            for stem in stems
-        ):
-            signals.append(
-                label
-            )
-
-    return signals
-
-
-def has_suspicious_latin(
-    text: str,
-) -> bool:
-
-    cleaned = re.sub(
-        r"https?://\S+",
-        "",
-        text,
-    )
-
-    cleaned = re.sub(
-        r"\bVK\b",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-
-    return bool(
-        re.search(
-            r"[A-Za-z]",
-            cleaned,
-        )
-    )
-
-
-async def send_long_text(
-    message,
-    text: str,
-    reply_markup=None,
-) -> None:
-
-    text = (
-        text
-        or ""
-    ).strip()
-
+def clean_ai_text(text: str) -> str:
     if not text:
-
-        await message.reply_text(
-            "ИИ вернул пустой ответ. Попробуй ещё раз."
-        )
-
-        return
-
-    parts = [
-        text[i:i + 3900]
-        for i in range(
-            0,
-            len(text),
-            3900,
-        )
-    ]
-
-    for index, part in enumerate(
-        parts
-    ):
-
-        markup = (
-            reply_markup
-            if index == len(parts) - 1
-            else None
-        )
-
-        await message.reply_text(
-            part,
-            reply_markup=markup,
-        )
-
-
-def extract_chat_text(
-    response,
-) -> str:
-
-    if not response.choices:
         return ""
 
-    message = response.choices[
-        0
-    ].message
+    text = text.strip()
 
-    if message is None:
-        return ""
+    text = text.replace("```text", "")
+    text = text.replace("```", "")
 
-    content = message.content
-
-    if isinstance(
-        content,
-        str,
-    ):
-        return content.strip()
-
-    return ""
+    return text.strip()
 
 
-async def request_text_model(
-    model: str,
-    prompt: str,
-) -> str:
+def has_suspicious_latin(text: str) -> bool:
+    if not text:
+        return False
 
+    cleaned = re.sub(r"\bVK\b", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"https?://\S+", "", cleaned)
+
+    latin_words = re.findall(r"[A-Za-z]{3,}", cleaned)
+
+    return len(latin_words) >= 2
+
+
+async def ai_text_once(prompt: str, model: str) -> str:
     response = await openai_client.chat.completions.create(
         model=model,
         messages=[
@@ -896,201 +249,380 @@ async def request_text_model(
                 "content": prompt,
             },
         ],
+        temperature=0.7,
     )
 
-    return extract_chat_text(
-        response
-    )
+    if not response.choices:
+        raise RuntimeError("OpenRouter не вернул choices")
+
+    return clean_ai_text(response.choices[0].message.content or "")
 
 
-async def ai_text(
-    prompt: str,
-    model: str | None = None,
-) -> str:
-
-    if not ai_ready():
-
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is not configured"
-        )
-
-    primary_model = (
-        model
-        or TEXT_MODEL
-    )
-
+async def ai_text(prompt: str) -> str:
     try:
-
-        text = await request_text_model(
-            primary_model,
-            prompt,
-        )
+        text = await ai_text_once(prompt, TEXT_MODEL)
 
         if text:
             return text
-
-        logger.warning(
-            "Primary model returned empty response: %s",
-            primary_model,
-        )
-
-    except Exception as error:
-
-        logger.warning(
-            "Primary model failed: %s",
-            error,
-        )
-
-    if (
-        primary_model
-        == FALLBACK_TEXT_MODEL
-    ):
-
-        raise RuntimeError(
-            "OpenRouter returned an empty response"
-        )
-
-    try:
-
-        text = await request_text_model(
-            FALLBACK_TEXT_MODEL,
-            prompt,
-        )
-
-        if text:
-            return text
-
-    except Exception as error:
-
-        logger.warning(
-            "Fallback model failed: %s",
-            error,
-        )
-
-    raise RuntimeError(
-        "OpenRouter primary and fallback models failed"
-    )
-
-
-async def rewrite_to_clean_russian(
-    text: str,
-) -> str:
-
-    if not has_suspicious_latin(
-        text
-    ):
-        return text
-
-    try:
-
-        cleaned = await ai_text(
-            "Перепиши следующий ответ без изменения смысла.\n"
-            "Оставь ту же структуру и эмодзи.\n"
-            "Удали случайные английские и смешанные слова.\n"
-            "Используй только грамотный русский язык.\n"
-            "Не добавляй новых фактов.\n"
-            "Слово VK можно оставить.\n\n"
-            + text,
-            model=FALLBACK_TEXT_MODEL,
-        )
-
-        return (
-            cleaned
-            or text
-        )
 
     except Exception:
+        logger.exception("Primary text model failed")
 
-        logger.exception(
-            "Russian cleanup failed"
-        )
+    return await ai_text_once(prompt, TEXT_FALLBACK_MODEL)
 
+
+async def rewrite_to_clean_russian(text: str) -> str:
+    if not has_suspicious_latin(text):
+        return text
+
+    prompt = f"""
+Перепиши этот ответ на чистом естественном русском языке.
+
+Сохрани смысл и структуру.
+Не добавляй новых фактов.
+Не используй английские слова, кроме названия VK, если оно необходимо.
+
+Текст:
+{text}
+"""
+
+    try:
+        return await ai_text_once(prompt, TEXT_FALLBACK_MODEL)
+    except Exception:
+        logger.exception("Russian cleanup failed")
         return text
 
 
-async def telegram_photo_data_url(
+def get_pool(context: ContextTypes.DEFAULT_TYPE):
+    return context.application.bot_data.get(DB_KEY)
+
+
+async def ensure_profile_table(context: ContextTypes.DEFAULT_TYPE):
+    pool = get_pool(context)
+
+    if not pool:
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vk_manager_profile_state (
+                telegram_id BIGINT PRIMARY KEY,
+                current_city TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+
+async def ensure_task_history_table(context: ContextTypes.DEFAULT_TYPE):
+    pool = get_pool(context)
+
+    if not pool:
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vk_manager_task_history (
+                id BIGSERIAL PRIMARY KEY,
+                telegram_id BIGINT NOT NULL,
+                task_text TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+
+async def set_current_city(
     context: ContextTypes.DEFAULT_TYPE,
-    file_id: str,
-) -> str:
+    telegram_id: int,
+    city: str,
+):
+    pool = get_pool(context)
 
-    tg_file = await context.bot.get_file(
-        file_id
-    )
+    if not pool:
+        return
 
-    raw = await tg_file.download_as_bytearray()
+    await ensure_profile_table(context)
 
-    encoded = base64.b64encode(
-        raw
-    ).decode(
-        "utf-8"
-    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO vk_manager_profile_state
+                (telegram_id, current_city, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (telegram_id)
+            DO UPDATE SET
+                current_city = EXCLUDED.current_city,
+                updated_at = now();
+            """,
+            telegram_id,
+            city,
+        )
 
-    return (
-        "data:image/jpeg;base64,"
-        + encoded
-    )
 
-
-async def ai_post_from_photos(
+async def get_current_city(
     context: ContextTypes.DEFAULT_TYPE,
-    file_ids: list[str],
-    user_caption: str = "",
-    current_city: str = "",
-) -> str:
+    telegram_id: int,
+) -> Optional[str]:
+    pool = get_pool(context)
 
-    city_context = (
-        current_city
-        if current_city
-        else "не указан"
+    if not pool:
+        return None
+
+    await ensure_profile_table(context)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT current_city
+            FROM vk_manager_profile_state
+            WHERE telegram_id = $1;
+            """,
+            telegram_id,
+        )
+
+    if not row:
+        return None
+
+    return row["current_city"]
+
+
+async def save_today_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_id: int,
+    task_text: str,
+):
+    pool = get_pool(context)
+
+    if not pool:
+        return
+
+    await ensure_task_history_table(context)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO vk_manager_task_history
+                (telegram_id, task_text)
+            VALUES ($1, $2);
+            """,
+            telegram_id,
+            task_text,
+        )
+
+        await conn.execute(
+            """
+            DELETE FROM vk_manager_task_history
+            WHERE telegram_id = $1
+              AND id NOT IN (
+                  SELECT id
+                  FROM vk_manager_task_history
+                  WHERE telegram_id = $1
+                  ORDER BY created_at DESC, id DESC
+                  LIMIT 10
+              );
+            """,
+            telegram_id,
+        )
+
+
+async def get_recent_tasks(
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_id: int,
+):
+    pool = get_pool(context)
+
+    if not pool:
+        return []
+
+    await ensure_task_history_table(context)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT task_text
+            FROM vk_manager_task_history
+            WHERE telegram_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 10;
+            """,
+            telegram_id,
+        )
+
+    return [row["task_text"] for row in rows]
+
+
+def detect_city(text: str) -> Optional[str]:
+    t = text.lower().replace("ё", "е")
+
+    if "нижн" in t and "новгород" in t:
+        return "Нижний Новгород"
+
+    if "мурманск" in t:
+        return "Мурманск"
+
+    return None
+
+
+def is_location_statement(text: str) -> bool:
+    t = text.lower().strip().replace("ё", "е")
+
+    exact_answers = {
+        "мурманск",
+        "в мурманске",
+        "нижний новгород",
+        "в нижнем новгороде",
+    }
+
+    if t in exact_answers:
+        return True
+
+    location_phrases = [
+        "я сейчас в ",
+        "сейчас я в ",
+        "я в ",
+        "нахожусь в ",
+        "я теперь в ",
+        "теперь я в ",
+        "сегодня я в ",
+        "приехала в ",
+        "приехал в ",
+        "вернулась в ",
+        "вернулся в ",
+    ]
+
+    return any(phrase in t for phrase in location_phrases)
+
+
+def city_in_phrase(city: Optional[str]) -> str:
+    if city == "Нижний Новгород":
+        return "Нижнем Новгороде"
+
+    if city == "Мурманск":
+        return "Мурманске"
+
+    return "текущем городе"
+
+
+def recent_repeat_signals(tasks):
+    combined = "\n".join(tasks).lower()
+
+    groups = {
+        "кофе или чашка": ["кофе", "чашк"],
+        "окно": ["окно", "окна", "подокон"],
+        "селфи": ["селфи"],
+        "ноги или шаги": ["ноги", "ног", "шаг"],
+        "маршрут или прогулка": ["маршрут", "прогул", "идти", "пройти"],
+        "отражение или тень": ["отраж", "тень"],
+        "дверь или подъезд": ["двер", "подъезд"],
+        "туристическая точка как фон": [
+            "кремл",
+            "чкалов",
+            "набереж",
+            "достопримеч",
+        ],
+    }
+
+    found = []
+
+    for name, words in groups.items():
+        if any(word in combined for word in words):
+            found.append(name)
+
+    return found
+
+
+async def build_today_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_id: int,
+):
+    city = await get_current_city(context, telegram_id)
+    tasks = await get_recent_tasks(context, telegram_id)
+
+    recent_text = "\n\n".join(tasks) if tasks else "Истории пока нет."
+    repeats = recent_repeat_signals(tasks)
+
+    repeat_text = (
+        ", ".join(repeats)
+        if repeats
+        else "явных повторов пока нет"
     )
 
-    content: list[
-        dict[str, Any]
-    ] = [
+    city_text = (
+        f"Пользователь сейчас находится в {city_in_phrase(city)}."
+        if city
+        else
+        "Текущий город пользователя неизвестен. Не придумывай его."
+    )
+
+    prompt = f"""
+{city_text}
+
+Ты сегодня управляешь контентом страницы.
+
+Выбери ОДНО лучшее конкретное задание на сегодня.
+Не предлагай меню из вариантов.
+
+Последние задания:
+{recent_text}
+
+Уже часто использовавшиеся элементы:
+{repeat_text}
+
+Сделай новое задание заметно отличающимся от последних.
+
+Не повторяй без необходимости:
+кофе, чашку, окно, селфи, ноги, шаги, обычную прогулку,
+отражение, тень, подъезд и дверь.
+
+Не отправляй пользователя специально к туристической
+достопримечательности только ради красивого фона.
+
+Используй место только если оно естественно связано с реальным днём.
+
+Задание должно быть реально выполнимо с телефона.
+
+Формат ответа строго такой:
+
+🎯 Сегодня
+[одно конкретное задание]
+
+📸 Сними
+1. ...
+2. ...
+3. ...
+
+✍️ Идея
+[что может стать смыслом публикации]
+
+💡 Зачем
+[короткое объяснение простыми словами, без технического жаргона]
+"""
+
+    result = await ai_text(prompt)
+    result = await rewrite_to_clean_russian(result)
+
+    await save_today_task(context, telegram_id, result)
+
+    return result
+
+
+async def image_bytes_to_data_url(data: bytes, mime_type="image/jpeg"):
+    encoded = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+async def ai_post_from_photos(image_urls, prompt: str) -> str:
+    content = [
         {
             "type": "input_text",
-            "text": (
-                "Ты получил фотографии "
-                "для личной страницы ВКонтакте.\n\n"
-                "Сохранённый текущий город пользователя: "
-                + city_context
-                + ".\n\n"
-                "Не утверждай, что фотография сделана "
-                "в этом городе, если это не видно "
-                "и пользователь этого не написал.\n\n"
-                "Проанализируй фотографии "
-                "как контент-менеджер.\n"
-                "Если фотографий несколько — "
-                "выбери сильные кадры "
-                "и лучший порядок.\n"
-                "Не придумывай обстоятельства съёмки.\n"
-                "Если материал подходит — "
-                "создай один готовый пост.\n"
-                "Если материал слабый — "
-                "скажи, что лучше доснять.\n\n"
-                "Пиши только на естественном русском языке.\n\n"
-                "После текста напиши:\n"
-                "Лучшие фото: ...\n"
-                "Почему: ...\n"
-                "Что следующим: ...\n\n"
-                "Комментарий пользователя: "
-                + (
-                    user_caption
-                    or "нет"
-                )
-            ),
+            "text": SYSTEM_PROMPT + "\n\n" + prompt,
         }
     ]
 
-    for file_id in file_ids[
-        :10
-    ]:
-
-        image_url = await telegram_photo_data_url(
-            context,
-            file_id,
-        )
-
+    for image_url in image_urls:
         content.append(
             {
                 "type": "input_image",
@@ -1098,1619 +630,981 @@ async def ai_post_from_photos(
             }
         )
 
-    response = await openai_client.responses.create(
-        model=VISION_MODEL,
-        instructions=SYSTEM_PROMPT,
-        input=[
+    try:
+        response = await openai_client.responses.create(
+            model=VISION_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": content,
+                }
+            ],
+        )
+
+        text = clean_ai_text(response.output_text or "")
+
+        if text:
+            return await rewrite_to_clean_russian(text)
+
+    except Exception:
+        logger.exception("Vision responses API failed")
+
+    # Запасной вариант через Chat Completions
+    chat_content = [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT + "\n\n" + prompt,
+        }
+    ]
+
+    for image_url in image_urls:
+        chat_content.append(
             {
-                "role": "user",
-                "content": content,
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url,
+                },
             }
-        ],
-    )
-
-    text = (
-        response.output_text
-        or ""
-    ).strip()
-
-    if not text:
-
-        raise RuntimeError(
-            "Vision model returned an empty response"
         )
-
-    return text
-
-
-async def telegram_video_data_url(
-    context: ContextTypes.DEFAULT_TYPE,
-    file_id: str,
-    mime_type: str | None,
-) -> str:
-
-    tg_file = await context.bot.get_file(
-        file_id
-    )
-
-    raw = await tg_file.download_as_bytearray()
-
-    encoded = base64.b64encode(
-        raw
-    ).decode(
-        "utf-8"
-    )
-
-    mime = (
-        mime_type
-        or "video/mp4"
-    ).lower()
-
-    if mime not in {
-        "video/mp4",
-        "video/quicktime",
-        "video/webm",
-        "video/mpeg",
-    }:
-
-        mime = "video/mp4"
-
-    return (
-        f"data:{mime};base64,"
-        f"{encoded}"
-    )
-
-
-async def ai_analyze_video(
-    context: ContextTypes.DEFAULT_TYPE,
-    file_id: str,
-    mime_type: str | None,
-    caption: str,
-    current_city: str,
-) -> str:
-
-    video_url = await telegram_video_data_url(
-        context,
-        file_id,
-        mime_type,
-    )
-
-    city_context = (
-        current_city
-        if current_city
-        else "не указан"
-    )
-
-    prompt = (
-        "Проанализируй присланное видео "
-        "как личный контент-менеджер "
-        "страницы ВКонтакте.\n\n"
-        "Сохранённый текущий город пользователя: "
-        + city_context
-        + ".\n"
-        "Не утверждай место съёмки "
-        "только на основании сохранённого города.\n"
-        "Опирайся только на то, "
-        "что реально видно или слышно в видео, "
-        "и на подпись пользователя.\n\n"
-        "Не придумывай речь, события, людей, "
-        "место или обстоятельства.\n"
-        "Если речь слышна плохо — так и скажи.\n\n"
-        "Ответ строго по-русски в формате:\n\n"
-        "🎬 Вердикт\n"
-        "Стоит использовать / лучше не использовать "
-        "+ коротко почему.\n\n"
-        "👀 Что в видео работает\n"
-        "2–4 конкретных наблюдения.\n\n"
-        "✂️ Что изменить\n"
-        "Что обрезать, сократить или переставить.\n\n"
-        "⭐ Лучший момент\n"
-        "Опиши сильнейший фрагмент. "
-        "Если можешь уверенно определить время — "
-        "укажи его. Иначе не выдумывай секунды.\n\n"
-        "📱 Как использовать в VK\n"
-        "Клип, пост с видео или не публиковать — "
-        "выбери один вариант.\n\n"
-        "✍️ Текст\n"
-        "Дай короткую готовую подпись "
-        "только из известных фактов.\n\n"
-        "💡 Зачем\n"
-        "Одно предложение о роли материала "
-        "в развитии страницы.\n\n"
-        "Подпись пользователя к видео: "
-        + (
-            caption
-            or "нет"
-        )
-    )
 
     response = await openai_client.chat.completions.create(
-        model=VIDEO_MODEL,
+        model=VISION_MODEL,
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            SYSTEM_PROMPT
-                            + "\n\n"
-                            + prompt
-                        ),
-                    },
-                    {
-                        "type": "video_url",
-                        "video_url": {
-                            "url": video_url,
-                        },
-                    },
-                ],
+                "content": chat_content,
             }
         ],
     )
 
-    text = extract_chat_text(
-        response
+    if not response.choices:
+        raise RuntimeError("Модель не вернула результат анализа изображений")
+
+    text = clean_ai_text(response.choices[0].message.content or "")
+
+    return await rewrite_to_clean_russian(text)
+
+
+def jpeg_from_video_frame(frame) -> bytes:
+    width = frame.width
+    height = frame.height
+
+    max_side = 1280
+
+    scale = min(1.0, max_side / max(width, height))
+
+    new_width = max(2, int(width * scale))
+    new_height = max(2, int(height * scale))
+
+    # Для кодека удобнее чётные размеры
+    if new_width % 2:
+        new_width -= 1
+
+    if new_height % 2:
+        new_height -= 1
+
+    frame = frame.reformat(
+        width=new_width,
+        height=new_height,
+        format="yuvj420p",
     )
 
-    if not text:
+    codec = av.CodecContext.create("mjpeg", "w")
+    codec.width = new_width
+    codec.height = new_height
+    codec.pix_fmt = "yuvj420p"
 
-        raise RuntimeError(
-            "Video model returned an empty response"
+    packets = codec.encode(frame)
+    packets += codec.encode(None)
+
+    if not packets:
+        raise RuntimeError("Не удалось превратить кадр в JPEG")
+
+    return b"".join(bytes(packet) for packet in packets)
+
+
+def extract_video_frames(video_bytes: bytes):
+    """
+    Извлекает до MAX_VIDEO_FRAMES кадров,
+    распределённых по ролику.
+
+    Никакой отправки видео в OpenRouter здесь нет.
+    """
+    container = av.open(io.BytesIO(video_bytes))
+
+    try:
+        video_stream = next(
+            stream
+            for stream in container.streams
+            if stream.type == "video"
         )
+    except StopIteration:
+        container.close()
+        raise RuntimeError("В файле не найден видеопоток")
 
-    return await rewrite_to_clean_russian(
-        text
-    )
+    duration_seconds = None
 
+    try:
+        if video_stream.duration is not None and video_stream.time_base is not None:
+            duration_seconds = float(
+                video_stream.duration * video_stream.time_base
+            )
+        elif container.duration is not None:
+            duration_seconds = float(container.duration / av.time_base)
+    except Exception:
+        duration_seconds = None
 
-def save_draft(
-    context: ContextTypes.DEFAULT_TYPE,
-    text: str,
-    file_ids: list[str] | None = None,
-) -> None:
+    if duration_seconds and duration_seconds > 0:
+        if MAX_VIDEO_FRAMES == 1:
+            targets = [duration_seconds / 2]
+        else:
+            # Немного отступаем от самых краёв ролика
+            start = min(0.1, duration_seconds * 0.05)
+            end = max(start, duration_seconds - start)
 
-    context.user_data[
-        "draft_text"
-    ] = text
-
-    context.user_data[
-        "draft_photo_ids"
-    ] = list(
-        file_ids
-        or []
-    )
-
-
-def draft_keyboard() -> InlineKeyboardMarkup:
-
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✅ Оставить как готовый",
-                    callback_data="keep_draft",
-                ),
-                InlineKeyboardButton(
-                    "🔄 Переделать",
-                    callback_data="rewrite_draft",
-                ),
+            targets = [
+                start + (end - start) * i / (MAX_VIDEO_FRAMES - 1)
+                for i in range(MAX_VIDEO_FRAMES)
             ]
-        ]
-    )
+    else:
+        targets = [0, 0.5, 1, 1.5, 2, 2.5]
 
+    frames = []
+    target_index = 0
+    decoded_count = 0
 
-async def build_today_task(
-    context: ContextTypes.DEFAULT_TYPE,
-    telegram_id: int,
-) -> str | None:
+    for frame in container.decode(video=video_stream.index):
+        decoded_count += 1
 
-    city = await get_current_city(
-        context,
-        telegram_id,
-    )
-
-    if not city:
-        return None
-
-    recent_tasks = await get_recent_tasks(
-        context,
-        telegram_id,
-    )
-
-    repeat_signals = recent_repeat_signals(
-        recent_tasks
-    )
-
-    history_text = ""
-
-    if recent_tasks:
-
-        history_text = (
-            "\n\nПРЕДЫДУЩИЕ ЗАДАНИЯ.\n"
-            "Новое задание не должно повторять "
-            "их центральный сюжет или механику:\n\n"
-        )
-
-        for index, task in enumerate(
-            recent_tasks,
-            start=1,
-        ):
-
-            history_text += (
-                f"{index}. "
-                f"{task[:750]}\n\n"
-            )
-
-    blocked_text = ""
-
-    if repeat_signals:
-
-        blocked_text = (
-            "\n\nВ ПОСЛЕДНИХ ЗАДАНИЯХ УЖЕ ВСТРЕЧАЛИСЬ:\n— "
-            + "\n— ".join(
-                repeat_signals
-            )
-            + "\nНе используй эти элементы "
-            "в новом задании, "
-            "если без них можно обойтись."
-        )
-
-    prompt = (
-        "Ты личный контент-менеджер "
-        "и сам принимаешь решение.\n\n"
-        "Подтверждённый текущий город пользователя: "
-        + city
-        + ".\n"
-        "Не спрашивай город снова.\n\n"
-        "Выбери ОДНУ конкретную задачу на сегодня "
-        "для развития личной страницы VK.\n\n"
-        "Не предлагай несколько вариантов.\n"
-        "Не заканчивай вопросом.\n"
-        "Не придумывай события, погоду, "
-        "планы семьи или посещённые места.\n"
-        "Не отправляй пользователя специально "
-        "к достопримечательности только ради фона.\n"
-        "Задача должна быть выполнима телефоном.\n\n"
-        "Не используй по умолчанию кофе, окно, ноги, "
-        "маршрут, селфи, отражение, тень, дверь "
-        "или подъезд.\n\n"
-        "Ответ строго в формате:\n\n"
-        "🎯 Сегодня\n"
-        "Одна конкретная идея.\n\n"
-        "📸 Сними\n"
-        "3–4 конкретных кадра или видео.\n\n"
-        "🖼 Если момент уже прошёл\n"
-        "Что поискать в галерее.\n\n"
-        "📤 Потом пришли мне\n"
-        "Что именно отправить боту.\n\n"
-        "💡 Зачем\n"
-        "Одна короткая причина.\n"
-        + blocked_text
-        + history_text
-    )
-
-    result = await ai_text(
-        prompt
-    )
-
-    result = await rewrite_to_clean_russian(
-        result
-    )
-
-    await save_today_task(
-        context,
-        telegram_id,
-        result,
-    )
-
-    return result
-
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-    user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-    ):
-        return
-
-    pool = context.bot_data.get(
-        DB_KEY
-    )
-
-    if pool is not None:
+        if decoded_count > 5000:
+            break
 
         try:
-
-            await db.upsert_user(
-                pool,
-                user.id,
-                user.username,
-                user.first_name,
-            )
-
+            frame_time = float(frame.time) if frame.time is not None else None
         except Exception:
+            frame_time = None
 
-            logger.exception(
-                "Could not save Telegram user"
+        if frame_time is None:
+            # Если у кадра нет времени, берём редкие кадры
+            if decoded_count == 1 or decoded_count % 30 == 0:
+                frames.append(jpeg_from_video_frame(frame))
+
+                if len(frames) >= MAX_VIDEO_FRAMES:
+                    break
+
+            continue
+
+        while (
+            target_index < len(targets)
+            and frame_time >= targets[target_index]
+        ):
+            frames.append(jpeg_from_video_frame(frame))
+            target_index += 1
+
+            if len(frames) >= MAX_VIDEO_FRAMES:
+                break
+
+        if len(frames) >= MAX_VIDEO_FRAMES:
+            break
+
+    container.close()
+
+    # Для очень короткого ролика хотя бы первый кадр
+    if not frames:
+        container = av.open(io.BytesIO(video_bytes))
+
+        try:
+            stream = next(
+                stream
+                for stream in container.streams
+                if stream.type == "video"
             )
 
-    city = await get_current_city(
-        context,
-        user.id,
+            for frame in container.decode(video=stream.index):
+                frames.append(jpeg_from_video_frame(frame))
+                break
+        finally:
+            container.close()
+
+    if not frames:
+        raise RuntimeError("Не удалось извлечь ни одного кадра")
+
+    return frames
+
+
+async def telegram_photo_data_url(photo):
+    tg_file = await photo.get_file()
+    data = bytes(await tg_file.download_as_bytearray())
+
+    return await image_bytes_to_data_url(data, "image/jpeg")
+
+
+async def telegram_video_frames(video):
+    if video.file_size and video.file_size > MAX_VIDEO_BYTES:
+        raise ValueError("VIDEO_TOO_LARGE")
+
+    tg_file = await video.get_file()
+    data = bytes(await tg_file.download_as_bytearray())
+
+    if len(data) > MAX_VIDEO_BYTES:
+        raise ValueError("VIDEO_TOO_LARGE")
+
+    frames = await asyncio.to_thread(
+        extract_video_frames,
+        data,
     )
 
-    recent_tasks = await get_recent_tasks(
-        context,
-        user.id,
-    )
+    urls = []
 
-    if city:
-
-        city_line = (
-            "\n\nСейчас я помню: ты в "
-            + city_in_phrase(city)
-            + "."
+    for frame_bytes in frames:
+        urls.append(
+            await image_bytes_to_data_url(
+                frame_bytes,
+                "image/jpeg",
+            )
         )
 
-    else:
+    return urls
 
-        city_line = (
-            "\n\nТекущий город пока не сохранён."
-        )
 
-    memory_line = (
-        "\nПамять заданий: "
-        + str(len(recent_tasks))
-        + "/10."
+def save_draft(context: ContextTypes.DEFAULT_TYPE, text: str):
+    context.user_data["last_draft"] = text
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_allowed(update):
+        return
+
+    text = (
+        "Я готова работать как твой AI-менеджер VK.\n\n"
+        "Я могу придумать, что публиковать, написать пост, "
+        "составить план, разобрать фотографии и короткое видео.\n\n"
+        "Видео сейчас анализируется бесплатно по кадрам — "
+        "без отправки самого видео в платный видео-API.\n\n"
+        "Я также запоминаю последние задания «Что делать сегодня», "
+        "чтобы не повторять одно и то же."
     )
 
-    await message.reply_text(
-        "Привет! Я VK AI Manager.\n\n"
-        "Я работаю как менеджер твоей личной страницы VK.\n"
-        "Теперь я умею анализировать "
-        "фотографии и короткие видео."
-        + city_line
-        + memory_line,
-        reply_markup=MAIN_MENU_KEYBOARD,
+    await update.message.reply_text(
+        text,
+        reply_markup=main_keyboard(),
     )
 
 
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not user_allowed(update):
         return
 
-    if update.effective_message:
+    text = """
+Что умею:
 
-        await send_long_text(
-            update.effective_message,
-            HELP_TEXT,
-        )
+/today — одно лучшее задание на сегодня
+/post — придумать пост
+/plan — план на неделю
+/strategy — стратегия роста
+/next — что публиковать дальше
+/status — состояние менеджера
+/myid — твой Telegram ID
+/ping — проверка работы
+
+Можно просто прислать фотографию или несколько фотографий.
+
+Можно прислать короткое видео из галереи.
+Я возьму из него несколько кадров и разберу их как визуальную историю.
+
+Звук в бесплатном режиме пока не анализируется.
+"""
+
+    await update.message.reply_text(text.strip())
 
 
-async def myid(
+async def myid_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    del context
-
-    user = update.effective_user
-
-    if (
-        update.effective_message
-        and user
-    ):
-
-        await update.effective_message.reply_text(
-            "Твой Telegram ID: "
-            + str(user.id)
-        )
-
-
-async def ping(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not update.effective_user:
         return
 
-    message = update.effective_message
-
-    if message is None:
-        return
-
-    client = context.bot_data.get(
-        REDIS_KEY
+    await update.message.reply_text(
+        f"Твой Telegram ID: {update.effective_user.id}"
     )
 
-    if client is None:
 
-        await message.reply_text(
-            "pong"
-        )
-
+async def ping_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not user_allowed(update):
         return
 
-    try:
-
-        cached = await cache.get_or_set_ping(
-            client
-        )
-
-        await message.reply_text(
-            "pong (cached)"
-            if cached
-            else "pong (fresh)"
-        )
-
-    except Exception:
-
-        await message.reply_text(
-            "pong"
-        )
+    await update.message.reply_text("Работаю ✅")
 
 
 async def status_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not user_allowed(update):
         return
 
-    message = update.effective_message
     user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-    ):
-        return
 
     city = await get_current_city(
         context,
         user.id,
     )
 
-    recent_tasks = await get_recent_tasks(
+    tasks = await get_recent_tasks(
         context,
         user.id,
     )
 
-    await message.reply_text(
-        "ИИ OpenRouter: "
-        + (
-            "✅"
-            if ai_ready()
-            else "❌"
-        )
-        + "\nЗакрытый доступ: "
-        + (
-            "✅"
-            if ADMIN_TELEGRAM_ID
-            else "⚠️"
-        )
-        + "\nТекущий город: "
-        + (
-            city
-            or "не указан"
-        )
-        + "\nПамять заданий: "
-        + str(len(recent_tasks))
-        + "/10"
-        + "\nАнализ фото: ✅"
-        + "\nАнализ коротких видео: ✅"
-        + "\nАвтопубликация в VK: выключена"
+    city_text = city or "не указан"
+
+    text = (
+        "✅ AI-менеджер работает\n"
+        f"📍 Текущий город: {city_text}\n"
+        f"🧠 Память заданий: {len(tasks)}/10\n"
+        "📷 Анализ фото: включён\n"
+        "🎞 Анализ коротких видео по кадрам: включён\n"
+        "🔊 Анализ звука видео: пока выключен\n"
+        "🚫 Автопубликация без подтверждения: выключена"
     )
+
+    await update.message.reply_text(text)
 
 
 async def today_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not user_allowed(update):
         return
 
-    message = update.effective_message
-    user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-    ):
-        return
-
-    city = await get_current_city(
-        context,
-        user.id,
-    )
-
-    if not city:
-
-        await message.reply_text(
-            "В каком городе ты сейчас — "
-            "Мурманск или Нижний Новгород?"
-        )
-
-        return
-
-    await message.reply_text(
-        "Проверяю предыдущие задания "
-        "и выбираю новое…"
+    message = await update.message.reply_text(
+        "Думаю, какое одно задание сегодня будет самым полезным…"
     )
 
     try:
-
         result = await build_today_task(
             context,
-            user.id,
+            update.effective_user.id,
         )
 
-        if not result:
-
-            await message.reply_text(
-                "Сначала скажи, "
-                "в каком городе ты сейчас."
-            )
-
-            return
-
-        await send_long_text(
-            message,
-            result,
-        )
+        await message.delete()
+        await send_long_text(update.message, result)
 
     except Exception:
+        logger.exception("Today command failed")
 
-        logger.exception(
-            "Today recommendation failed"
-        )
-
-        await message.reply_text(
-            "Не получилось выбрать задачу на сегодня. "
-            "Попробуй ещё раз."
-        )
-
-
-async def strategy_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-    user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-    ):
-        return
-
-    city = await get_current_city(
-        context,
-        user.id,
-    )
-
-    await message.reply_text(
-        "Готовлю стратегию роста…"
-    )
-
-    try:
-
-        prompt = (
-            "Составь практичную стратегию развития "
-            "этой личной страницы VK на 30 дней.\n"
-            "Не выдумывай события жизни.\n"
-            "Дай рубрики, форматы, частоту, "
-            "гипотезы роста, принципы отбора "
-            "фото и видео и план первых 7 дней.\n"
-            "Пиши естественным русским языком."
-        )
-
-        if city:
-
-            prompt += (
-                "\nТекущий город пользователя: "
-                + city
-                + ". Не спрашивай его снова."
-            )
-
-        result = await ai_text(
-            prompt
-        )
-
-        await send_long_text(
-            message,
-            result,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Strategy generation failed"
-        )
-
-        await message.reply_text(
-            "Не получилось составить стратегию."
-        )
-
-
-async def plan_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-    user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-    ):
-        return
-
-    city = await get_current_city(
-        context,
-        user.id,
-    )
-
-    recent_tasks = await get_recent_tasks(
-        context,
-        user.id,
-    )
-
-    await message.reply_text(
-        "Составляю план на неделю…"
-    )
-
-    try:
-
-        prompt = (
-            "Составь контент-план на 7 дней "
-            "для этой личной страницы VK.\n"
-            "Не выдумывай события будущей недели.\n"
-            "Чередуй разные типы контента.\n"
-            "Не повторяй одинаковые механики.\n"
-            "Можно оставить дни без публикации.\n"
-            "Учитывай фото и короткие видео.\n"
-            "Пиши естественным русским языком."
-        )
-
-        if city:
-
-            prompt += (
-                "\nТекущий город: "
-                + city
-                + "."
-            )
-
-        if recent_tasks:
-
-            prompt += (
-                "\n\nПоследние задания. "
-                "Не повторяй их буквально:\n"
-            )
-
-            for task in recent_tasks[
-                :7
-            ]:
-
-                prompt += (
-                    "\n— "
-                    + task[:500]
-                )
-
-        result = await ai_text(
-            prompt
-        )
-
-        context.user_data[
-            "last_plan"
-        ] = result
-
-        await send_long_text(
-            message,
-            result,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Content plan generation failed"
-        )
-
-        await message.reply_text(
-            "Не получилось составить план."
-        )
-
-
-async def next_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-    user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-    ):
-        return
-
-    city = await get_current_city(
-        context,
-        user.id,
-    )
-
-    recent_tasks = await get_recent_tasks(
-        context,
-        user.id,
-    )
-
-    prompt = (
-        "Выбери ОДИН лучший следующий материал "
-        "для личной страницы VK.\n"
-        "Не давай меню вариантов.\n"
-        "Не выдумывай события.\n"
-        "Не повторяй последние задания.\n"
-        "Дай цель, формат, что снять "
-        "или найти в галерее и зачем это нужно.\n"
-        "Пиши естественным русским языком."
-    )
-
-    if city:
-
-        prompt += (
-            "\nТекущий город: "
-            + city
-            + "."
-        )
-
-    if recent_tasks:
-
-        prompt += (
-            "\n\nПоследние задания:\n"
-        )
-
-        for task in recent_tasks[
-            :5
-        ]:
-
-            prompt += (
-                "\n— "
-                + task[:500]
-            )
-
-    try:
-
-        result = await ai_text(
-            prompt
-        )
-
-        await send_long_text(
-            message,
-            result,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "Next recommendation failed"
-        )
-
-        await message.reply_text(
-            "Не получилось выбрать следующий материал."
+        await message.edit_text(
+            "Не получилось придумать задание. Попробуй ещё раз чуть позже."
         )
 
 
 async def post_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-    user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-    ):
-        return
-
-    topic = " ".join(
-        context.args
-    ).strip()
-
-    if not topic:
-
-        await message.reply_text(
-            "Напиши тему после команды.\n\n"
-            "Например:\n"
-            "/post прогулка по городу"
-        )
-
+):
+    if not user_allowed(update):
         return
 
     city = await get_current_city(
         context,
-        user.id,
+        update.effective_user.id,
     )
 
-    await message.reply_text(
-        "Готовлю пост…"
+    city_info = (
+        f"Подтверждённый текущий город: {city}."
+        if city
+        else
+        "Текущий город не подтверждён."
     )
+
+    prompt = f"""
+{city_info}
+
+Предложи ОДНУ сильную идею публикации для моего VK-блога сегодня.
+
+Если для готового текста тебе не хватает реального события,
+не придумывай его.
+
+В таком случае дай конкретную идею:
+что снять или какую фотографию найти в галерее,
+какой должен быть смысл публикации.
+
+Если можно написать пост без выдуманных фактов —
+напиши готовый пост.
+"""
+
+    wait = await update.message.reply_text("Готовлю идею поста…")
 
     try:
+        result = await ai_text(prompt)
+        result = await rewrite_to_clean_russian(result)
 
-        prompt = (
-            "Создай один готовый пост "
-            "для личной страницы ВКонтакте.\n"
-            "Тема пользователя: "
-            + topic
-            + ".\n"
-            "Не придумывай факты.\n"
-            "Пиши естественным русским языком."
-        )
+        save_draft(context, result)
 
-        if city:
-
-            prompt += (
-                "\nТекущий город: "
-                + city
-                + ". Используй только если уместно."
-            )
-
-        text = await ai_text(
-            prompt
-        )
-
-        save_draft(
-            context,
-            text,
-        )
-
-        await send_long_text(
-            message,
-            text,
-            reply_markup=draft_keyboard(),
-        )
+        await wait.delete()
+        await send_long_text(update.message, result)
 
     except Exception:
-
-        logger.exception(
-            "Post generation failed"
-        )
-
-        await message.reply_text(
-            "Не получилось создать пост."
-        )
+        logger.exception("Post command failed")
+        await wait.edit_text("Не получилось создать пост. Попробуй ещё раз.")
 
 
-async def draft_callback(
+async def plan_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not user_allowed(update):
         return
 
-    query = update.callback_query
-
-    if query is None:
-        return
-
-    await query.answer()
-
-    if query.data == "keep_draft":
-
-        await query.edit_message_reply_markup(
-            reply_markup=None
-        )
-
-        await query.message.reply_text(
-            "✅ Оставила как готовый черновик."
-        )
-
-        return
-
-    if query.data == "rewrite_draft":
-
-        old_text = context.user_data.get(
-            "draft_text",
-            "",
-        )
-
-        await query.edit_message_reply_markup(
-            reply_markup=None
-        )
-
-        await query.message.reply_text(
-            "Переделываю…"
-        )
-
-        try:
-
-            new_text = await ai_text(
-                "Переделай этот текст.\n"
-                "Сделай естественнее.\n"
-                "Не добавляй новых фактов.\n"
-                "Пиши только по-русски.\n\n"
-                + old_text
-            )
-
-            save_draft(
-                context,
-                new_text,
-                context.user_data.get(
-                    "draft_photo_ids",
-                    [],
-                ),
-            )
-
-            await send_long_text(
-                query.message,
-                new_text,
-                reply_markup=draft_keyboard(),
-            )
-
-        except Exception:
-
-            logger.exception(
-                "Draft rewrite failed"
-            )
-
-            await query.message.reply_text(
-                "Не получилось переделать."
-            )
-
-
-async def text_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-    user = update.effective_user
-
-    if (
-        message is None
-        or user is None
-        or not message.text
-    ):
-        return
-
-    text = message.text.strip()
-
-    detected_city = detect_city(
-        text
-    )
-
-    if (
-        detected_city
-        and is_location_statement(text)
-    ):
-
-        await set_current_city(
-            context,
-            user.id,
-            detected_city,
-        )
-
-        await message.reply_text(
-            "Запомнила: сейчас ты в "
-            + city_in_phrase(
-                detected_city
-            )
-            + ".\n\n"
-            "Проверяю предыдущие задания "
-            "и выбираю новое…"
-        )
-
-        try:
-
-            result = await build_today_task(
-                context,
-                user.id,
-            )
-
-            if result:
-
-                await send_long_text(
-                    message,
-                    result,
-                )
-
-        except Exception:
-
-            logger.exception(
-                "City update today task failed"
-            )
-
-            await message.reply_text(
-                "Город сохранила, "
-                "но не получилось подготовить задачу."
-            )
-
-        return
-
-    current_city = await get_current_city(
+    city = await get_current_city(
         context,
-        user.id,
+        update.effective_user.id,
     )
 
-    prompt = (
-        text
-        + "\n\nОтвечай только "
-        "естественным русским языком."
-    )
+    prompt = f"""
+Составь практичный контент-план на ближайшие 7 дней.
 
-    if current_city:
+Текущий подтверждённый город:
+{city if city else "неизвестен"}.
 
-        prompt += (
-            "\nТекущий подтверждённый город пользователя: "
-            + current_city
-            + ". Не спрашивай его снова."
-        )
+Не придумывай события из жизни пользователя.
+
+На каждый день:
+— один основной формат;
+— тема;
+— что реально снять или найти в галерее;
+— зачем это нужно странице.
+
+Чередуй:
+личность автора, города, семью, мысли, быт,
+юмор, видео, фото и полезный настоящий опыт.
+
+Не заставляй публиковать ежедневно,
+если пауза логичнее.
+"""
+
+    wait = await update.message.reply_text("Составляю план на неделю…")
 
     try:
+        result = await ai_text(prompt)
+        result = await rewrite_to_clean_russian(result)
 
-        response = await ai_text(
-            prompt
-        )
-
-        await send_long_text(
-            message,
-            response,
-        )
+        await wait.delete()
+        await send_long_text(update.message, result)
 
     except Exception:
-
-        logger.exception(
-            "AI text request failed"
-        )
-
-        await message.reply_text(
-            "Не удалось получить ответ от ИИ."
-        )
+        logger.exception("Plan command failed")
+        await wait.edit_text("Не получилось составить план.")
 
 
-async def process_album_after_delay(
-    media_group_id: str,
+async def strategy_command(
+    update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    message = None
-
-    try:
-
-        await asyncio.sleep(
-            2.5
-        )
-
-        group = PHOTO_GROUPS.pop(
-            media_group_id,
-            None,
-        )
-
-        if not group:
-            return
-
-        file_ids = group[
-            "file_ids"
-        ]
-
-        message = group[
-            "message"
-        ]
-
-        caption = group.get(
-            "caption",
-            "",
-        )
-
-        user_id = group.get(
-            "user_id"
-        )
-
-        current_city = ""
-
-        if user_id:
-
-            current_city = await get_current_city(
-                context,
-                user_id,
-            )
-
-        await message.reply_text(
-            "Получила фотографий: "
-            + str(len(file_ids))
-            + ". Выбираю сильные кадры…"
-        )
-
-        text = await ai_post_from_photos(
-            context,
-            file_ids,
-            caption,
-            current_city,
-        )
-
-        save_draft(
-            context,
-            text,
-            file_ids,
-        )
-
-        await send_long_text(
-            message,
-            text,
-            reply_markup=draft_keyboard(),
-        )
-
-    except asyncio.CancelledError:
-
+):
+    if not user_allowed(update):
         return
 
+    prompt = """
+Дай практичную стратегию органического роста этой VK-страницы
+на ближайший месяц.
+
+Не обещай гарантированный рост.
+Не предлагай накрутку и спам.
+
+Сосредоточься на:
+— узнаваемом образе автора;
+— теме жизни между двумя городами;
+— сильных фото и коротких видео;
+— удержании интереса;
+— комментариях и реакции аудитории;
+— повторяемых рубриках без однообразия.
+
+Пиши конкретно и простым русским языком.
+"""
+
+    wait = await update.message.reply_text("Собираю стратегию…")
+
+    try:
+        result = await ai_text(prompt)
+        result = await rewrite_to_clean_russian(result)
+
+        await wait.delete()
+        await send_long_text(update.message, result)
+
     except Exception:
+        logger.exception("Strategy command failed")
+        await wait.edit_text("Не получилось подготовить стратегию.")
 
-        logger.exception(
-            "Album processing failed"
-        )
 
-        if message is not None:
+async def next_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not user_allowed(update):
+        return
 
-            try:
+    tasks = await get_recent_tasks(
+        context,
+        update.effective_user.id,
+    )
 
-                await message.reply_text(
-                    "Не удалось обработать альбом."
-                )
+    recent = "\n\n".join(tasks[:5]) if tasks else "Нет истории."
 
-            except Exception:
+    prompt = f"""
+Скажи, что лучше публиковать следующим.
 
-                pass
+Последние задания контент-менеджера:
+{recent}
+
+Выбери один формат и одну идею.
+Не повторяй автоматически недавние приёмы.
+Не придумывай факты из жизни.
+
+Скажи:
+1. Что именно сделать.
+2. Что снять или найти в галерее.
+3. Главную мысль.
+4. Почему это логичный следующий материал.
+"""
+
+    wait = await update.message.reply_text("Выбираю следующий материал…")
+
+    try:
+        result = await ai_text(prompt)
+        result = await rewrite_to_clean_russian(result)
+
+        await wait.delete()
+        await send_long_text(update.message, result)
+
+    except Exception:
+        logger.exception("Next command failed")
+        await wait.edit_text("Не получилось выбрать следующий материал.")
+
+
+async def analyse_photo_urls(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    urls,
+):
+    city = await get_current_city(
+        context,
+        update.effective_user.id,
+    )
+
+    prompt = f"""
+Перед тобой реальные фотографии пользователя.
+
+Текущий подтверждённый город:
+{city if city else "не указан"}.
+
+ВАЖНО:
+не определяй место по сохранённому городу.
+Говори о городе только если он действительно узнаваем на изображении
+или пользователь сам его указал.
+
+Разбери материал как контент-менеджер VK.
+
+Ответ:
+
+📸 Вердикт
+Подходит ли этот материал для публикации и насколько он сильный.
+
+👀 Что работает
+Что реально видно и что цепляет.
+
+✂️ Что изменить
+Что можно улучшить: кадрирование, порядок кадров,
+отбор или подачу.
+
+⭐ Лучший кадр
+Если фотографий несколько — какой сильнее и почему.
+
+📱 Как использовать в VK
+Пост, фотоподборка, история, обложка или другой подходящий формат.
+
+✍️ Текст
+Если фактов достаточно — напиши подходящий текст.
+Если недостаточно — не выдумывай историю,
+а предложи направление текста.
+
+💡 Зачем
+Какую роль материал может сыграть в блоге.
+"""
+
+    result = await ai_post_from_photos(urls, prompt)
+
+    save_draft(context, result)
+
+    await send_long_text(update.message, result)
 
 
 async def photo_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not user_allowed(update):
         return
 
-    message = update.effective_message
-    user = update.effective_user
+    message = update.message
 
-    if (
-        message is None
-        or user is None
-        or not message.photo
-    ):
+    if not message or not message.photo:
         return
 
-    file_id = message.photo[
-        -1
-    ].file_id
-
-    caption = (
-        message.caption
-        or ""
-    )
-
-    media_group_id = (
-        message.media_group_id
-    )
+    media_group_id = message.media_group_id
 
     if media_group_id:
+        key = f"{update.effective_user.id}:{media_group_id}"
 
-        group = PHOTO_GROUPS.setdefault(
-            media_group_id,
-            {
-                "file_ids": [],
-                "task": None,
+        if key not in PHOTO_GROUPS:
+            PHOTO_GROUPS[key] = {
+                "photos": [],
                 "message": message,
-                "caption": caption,
-                "user_id": user.id,
-            },
-        )
+                "context": context,
+                "update": update,
+                "task": None,
+            }
 
-        group[
-            "file_ids"
-        ].append(
-            file_id
-        )
+        PHOTO_GROUPS[key]["photos"].append(message.photo[-1])
 
-        group[
-            "message"
-        ] = message
+        old_task = PHOTO_GROUPS[key].get("task")
 
-        group[
-            "user_id"
-        ] = user.id
-
-        if caption:
-
-            group[
-                "caption"
-            ] = caption
-
-        old_task = group.get(
-            "task"
-        )
-
-        if (
-            old_task
-            and not old_task.done()
-        ):
-
+        if old_task and not old_task.done():
             old_task.cancel()
 
-        group[
-            "task"
-        ] = context.application.create_task(
-            process_album_after_delay(
-                media_group_id,
-                context,
-            )
+        PHOTO_GROUPS[key]["task"] = asyncio.create_task(
+            process_photo_album_after_delay(key)
         )
 
         return
 
-    current_city = await get_current_city(
-        context,
-        user.id,
-    )
-
-    await message.reply_text(
-        "Смотрю фото как контент-менеджер…"
-    )
+    wait = await message.reply_text("Смотрю фотографию…")
 
     try:
+        url = await telegram_photo_data_url(message.photo[-1])
 
-        text = await ai_post_from_photos(
+        await wait.delete()
+
+        await analyse_photo_urls(
+            update,
             context,
-            [file_id],
-            caption,
-            current_city,
-        )
-
-        save_draft(
-            context,
-            text,
-            [file_id],
-        )
-
-        await send_long_text(
-            message,
-            text,
-            reply_markup=draft_keyboard(),
+            [url],
         )
 
     except Exception:
+        logger.exception("Photo analysis failed")
 
-        logger.exception(
-            "Photo processing failed"
+        await wait.edit_text(
+            "Не получилось разобрать фотографию. Попробуй отправить её ещё раз."
         )
 
-        await message.reply_text(
-            "Не удалось обработать фото."
+
+async def process_photo_album_after_delay(key):
+    try:
+        await asyncio.sleep(2.5)
+
+        data = PHOTO_GROUPS.pop(key, None)
+
+        if not data:
+            return
+
+        update = data["update"]
+        context = data["context"]
+        message = data["message"]
+        photos = data["photos"]
+
+        wait = await message.reply_text(
+            f"Смотрю подборку: {len(photos)} фото…"
         )
+
+        urls = []
+
+        for photo in photos[:10]:
+            urls.append(
+                await telegram_photo_data_url(photo)
+            )
+
+        await wait.delete()
+
+        await analyse_photo_urls(
+            update,
+            context,
+            urls,
+        )
+
+    except asyncio.CancelledError:
+        return
+
+    except Exception:
+        logger.exception("Photo album analysis failed")
+
+        data = PHOTO_GROUPS.pop(key, None)
+
+        if data:
+            try:
+                await data["message"].reply_text(
+                    "Не получилось разобрать подборку фотографий."
+                )
+            except Exception:
+                pass
 
 
 async def video_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not user_allowed(update):
         return
 
-    message = update.effective_message
-    user = update.effective_user
+    message = update.message
 
-    if (
-        message is None
-        or user is None
-        or message.video is None
-    ):
+    if not message or not message.video:
         return
 
-    video = message.video
-
-    caption = (
-        message.caption
-        or ""
-    )
-
-    if (
-        video.file_size
-        and video.file_size
-        > MAX_VIDEO_BYTES
-    ):
-
-        await message.reply_text(
-            "Видео слишком большое "
-            "для первого варианта анализа.\n\n"
-            "Пришли более короткий фрагмент — "
-            "лучше до 18 МБ."
-        )
-
-        return
-
-    current_city = await get_current_city(
-        context,
-        user.id,
-    )
-
-    await message.reply_text(
-        "Смотрю видео: кадры, движение и звук. "
-        "Это может занять чуть дольше, "
-        "чем анализ фото…"
+    wait = await message.reply_text(
+        "Смотрю видео по кадрам. Звук пока не анализирую…"
     )
 
     try:
+        image_urls = await telegram_video_frames(message.video)
 
-        result = await ai_analyze_video(
+        city = await get_current_city(
             context,
-            video.file_id,
-            video.mime_type,
-            caption,
-            current_city,
+            update.effective_user.id,
         )
 
-        save_draft(
-            context,
-            result,
+        prompt = f"""
+Это НЕ фотографии, а несколько кадров,
+автоматически извлечённых из одного настоящего видео пользователя.
+
+Видео анализируется только визуально.
+Звук и речь тебе недоступны.
+
+Количество кадров:
+{len(image_urls)}.
+
+Текущий сохранённый город:
+{city if city else "не указан"}.
+
+Не делай вывод о месте только из сохранённого города.
+
+Не придумывай:
+— что человек говорит;
+— музыку;
+— звук;
+— точные таймкоды;
+— события вне видимых кадров.
+
+Сравни последовательность кадров и оцени видео как материал для VK.
+
+Ответ строго по структуре:
+
+🎬 Вердикт
+Насколько ролик подходит для страницы.
+
+👀 Что в видео работает
+Что действительно видно в последовательности кадров:
+герой, композиция, настроение, движение или смена планов.
+
+✂️ Что изменить
+Что можно укоротить, усилить или переснять.
+
+⭐ Лучший момент
+Опиши визуально самый сильный момент.
+Не придумывай точную секунду.
+
+📱 Как использовать в VK
+Клип, дополнение к посту или другой подходящий формат.
+
+✍️ Текст
+Дай один естественный вариант подписи
+или направление текста, если реального контекста недостаточно.
+
+💡 Зачем
+Как этот ролик может помочь общей истории страницы.
+
+В конце коротко напомни:
+«Звук в этом анализе не учитывался».
+"""
+
+        result = await ai_post_from_photos(
+            image_urls,
+            prompt,
         )
 
-        await send_long_text(
-            message,
-            result,
-            reply_markup=draft_keyboard(),
-        )
+        save_draft(context, result)
+
+        await wait.delete()
+        await send_long_text(message, result)
+
+    except ValueError as exc:
+        if str(exc) == "VIDEO_TOO_LARGE":
+            await wait.edit_text(
+                "Этот ролик слишком большой для текущего режима. "
+                "Для начала отправь видео до 18 МБ."
+            )
+        else:
+            logger.exception("Video validation failed")
+            await wait.edit_text(
+                "Не получилось обработать это видео."
+            )
 
     except Exception:
+        logger.exception("Video frame analysis failed")
 
-        logger.exception(
-            "Video processing failed"
-        )
-
-        await message.reply_text(
-            "Не получилось разобрать это видео.\n\n"
-            "Для первого теста попробуй "
-            "короткий ролик MP4 из галереи, "
-            "лучше до 18 МБ."
+        await wait.edit_text(
+            "Не получилось разобрать видео по кадрам.\n\n"
+            "Если ролик короткий, значит дело уже не в размере — "
+            "посмотрим одну строку ошибки в Railway."
         )
 
 
-async def menu_button(
+async def text_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+):
+    if not user_allowed(update):
         return
 
-    message = update.effective_message
+    message = update.message
 
-    if (
-        message is None
-        or not message.text
-    ):
+    if not message or not message.text:
         return
 
     text = message.text.strip()
 
-    if text == MENU_TODAY:
-
-        await today_command(
-            update,
-            context,
-        )
-
-    elif text == MENU_PLAN:
-
-        await plan_command(
-            update,
-            context,
-        )
-
-    elif text == MENU_NEXT:
-
-        await next_command(
-            update,
-            context,
-        )
-
-    elif text == MENU_STRATEGY:
-
-        await strategy_command(
-            update,
-            context,
-        )
-
-
-async def unknown_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
+    # Кнопки главного меню
+    if text == "Что делать сегодня":
+        await today_command(update, context)
         return
 
-    if update.effective_message:
+    if text == "План на неделю":
+        await plan_command(update, context)
+        return
 
-        await update.effective_message.reply_text(
-            "Не знаю такую команду. Нажми /help."
+    if text == "Что публиковать дальше":
+        await next_command(update, context)
+        return
+
+    if text == "Стратегия роста":
+        await strategy_command(update, context)
+        return
+
+    city = detect_city(text)
+
+    if city and is_location_statement(text):
+        await set_current_city(
+            context,
+            update.effective_user.id,
+            city,
+        )
+
+        await message.reply_text(
+            f"Запомнила: сейчас ты в {city_in_phrase(city)}."
+        )
+        return
+
+    saved_city = await get_current_city(
+        context,
+        update.effective_user.id,
+    )
+
+    city_context = (
+        f"Подтверждённый текущий город пользователя: {saved_city}."
+        if saved_city
+        else
+        "Подтверждённый текущий город пока неизвестен."
+    )
+
+    prompt = f"""
+{city_context}
+
+Сообщение пользователя:
+{text}
+
+Ответь как её персональный контент-менеджер VK.
+
+Если пользователь рассказывает реальный факт или событие,
+можешь использовать только то, что он действительно написал.
+
+Если просит текст публикации — подготовь сильный готовый вариант.
+
+Если просит совет — выбери один наиболее полезный вариант,
+а не длинный список.
+"""
+
+    wait = await message.reply_text("Думаю…")
+
+    try:
+        result = await ai_text(prompt)
+        result = await rewrite_to_clean_russian(result)
+
+        save_draft(context, result)
+
+        await wait.delete()
+        await send_long_text(message, result)
+
+    except Exception:
+        logger.exception("Text message failed")
+
+        await wait.edit_text(
+            "Сейчас не получилось получить ответ от AI. Попробуй ещё раз."
         )
 
 
 async def error_handler(
     update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    error = context.error
-
-    if isinstance(
-        error,
-        (
-            Conflict,
-            NetworkError,
-            TimedOut,
-        ),
-    ):
-
-        logger.warning(
-            "Transient Telegram error: %s",
-            error,
-        )
-
-        return
-
+    context: CallbackContext,
+):
     logger.error(
-        "Error while processing update: %s",
-        update,
-        exc_info=error,
+        "Exception while handling an update:",
+        exc_info=context.error,
     )
 
 
-async def set_bot_commands(
-    application: Application,
-) -> None:
-
-    await application.bot.set_my_commands(
-        BOT_COMMANDS
-    )
-
-
-def register_handlers(
-    application: Application,
-) -> None:
-
+def register_handlers(application: Application):
     application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        CommandHandler("start", start)
     )
-
     application.add_handler(
-        CommandHandler(
-            "today",
-            today_command,
-        )
+        CommandHandler("today", today_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "help",
-            help_command,
-        )
+        CommandHandler("post", post_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "myid",
-            myid,
-        )
+        CommandHandler("plan", plan_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "ping",
-            ping,
-        )
+        CommandHandler("strategy", strategy_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "status",
-            status_command,
-        )
+        CommandHandler("next", next_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "strategy",
-            strategy_command,
-        )
+        CommandHandler("help", help_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "plan",
-            plan_command,
-        )
+        CommandHandler("status", status_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "next",
-            next_command,
-        )
+        CommandHandler("myid", myid_command)
     )
-
     application.add_handler(
-        CommandHandler(
-            "post",
-            post_command,
-        )
+        CommandHandler("ping", ping_command)
     )
 
-    application.add_handler(
-        CallbackQueryHandler(
-            draft_callback,
-            pattern="^(keep_draft|rewrite_draft)$",
-        )
-    )
-
+    # Видео ставим раньше обычного текста
     application.add_handler(
         MessageHandler(
-            filters.Regex(
-                "^("
-                + MENU_TODAY
-                + "|"
-                + MENU_PLAN
-                + "|"
-                + MENU_NEXT
-                + "|"
-                + MENU_STRATEGY
-                + ")$"
-            ),
-            menu_button,
+            filters.VIDEO,
+            video_message,
         )
     )
 
@@ -2723,22 +1617,24 @@ def register_handlers(
 
     application.add_handler(
         MessageHandler(
-            filters.VIDEO,
-            video_message,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.COMMAND,
-            unknown_command,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND,
+            filters.TEXT & ~filters.COMMAND,
             text_message,
         )
     )
+
+
+async def set_bot_commands(application: Application):
+    commands = [
+        BotCommand("start", "Запустить менеджера"),
+        BotCommand("today", "Что делать сегодня"),
+        BotCommand("post", "Идея или текст поста"),
+        BotCommand("plan", "План на неделю"),
+        BotCommand("next", "Что публиковать дальше"),
+        BotCommand("strategy", "Стратегия роста"),
+        BotCommand("status", "Проверить состояние"),
+        BotCommand("help", "Что умеет бот"),
+        BotCommand("myid", "Мой Telegram ID"),
+        BotCommand("ping", "Проверить бота"),
+    ]
+
+    await application.bot.set_my_commands(commands)
