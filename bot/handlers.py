@@ -6,7 +6,6 @@ import logging
 import os
 from typing import Any
 
-import httpx
 from openai import AsyncOpenAI
 from telegram import (
     InlineKeyboardButton,
@@ -44,10 +43,6 @@ VISION_MODEL = os.getenv(
     "openrouter/free",
 ).strip()
 
-VK_ACCESS_TOKEN = os.getenv("VK_ACCESS_TOKEN", "").strip()
-VK_GROUP_ID = os.getenv("VK_GROUP_ID", "").strip()
-VK_API_VERSION = os.getenv("VK_API_VERSION", "5.199").strip()
-
 ADMIN_TELEGRAM_ID = os.getenv(
     "ADMIN_TELEGRAM_ID",
     "",
@@ -65,23 +60,23 @@ BOT_COMMANDS = (
     ("help", "Что умеет бот"),
     ("myid", "Показать мой Telegram ID"),
     ("post", "Создать пост"),
-    ("plan", "Контент-план"),
-    ("publish", "Опубликовать черновик"),
-    ("stats", "Статистика VK"),
+    ("plan", "План на 7 дней"),
+    ("strategy", "Стратегия роста"),
+    ("next", "Что публиковать дальше"),
     ("status", "Проверить подключения"),
     ("ping", "Проверить бота"),
 )
 
 
-MENU_HELP = "Помощь"
 MENU_PLAN = "План на неделю"
-MENU_STATUS = "Статус"
+MENU_NEXT = "Что публиковать дальше"
+MENU_STRATEGY = "Стратегия роста"
 
 
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [MENU_HELP, MENU_PLAN],
-        [MENU_STATUS],
+        [MENU_PLAN, MENU_NEXT],
+        [MENU_STRATEGY],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -92,56 +87,91 @@ MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
 HELP_TEXT = """
 Я — VK AI Manager.
 
-Что я умею:
+Моя главная задача — помогать развивать твою личную страницу ВКонтакте.
 
-/post тема
-Создать готовый пост.
+Я умею:
 
-/plan
-Составить контент-план на 7 дней,
-по 2 поста в день.
+• придумывать стратегию роста;
+• составлять контент-план;
+• создавать готовые посты;
+• анализировать одну фотографию или альбом;
+• выбирать сильные фотографии;
+• предлагать, что публиковать следующим;
+• придумывать заголовки, CTA и идеи визуала;
+• корректировать контент по результатам, если ты пришлёшь статистику.
 
-/stats
-Проанализировать последние посты VK.
+Команды:
 
-/publish
-Опубликовать последний черновик.
+/post тема — готовый пост
+/plan — план на 7 дней
+/strategy — стратегия роста
+/next — что публиковать дальше
+/status — проверка ИИ
+/myid — твой Telegram ID
 
-/status
-Проверить подключения.
+Можно просто писать мне обычным сообщением или присылать фотографии.
 
-/myid
-Показать твой Telegram ID.
-
-Можно просто писать мне текстом.
-
-Можно присылать одну фотографию
-или несколько фотографий одним альбомом.
-
-Я подготовлю пост по фотографиям.
-
-ВАЖНО:
-Я не публикую ничего без твоего
-явного подтверждения.
+Я ничего не публикую автоматически без твоего подтверждения.
 """.strip()
 
 
-SYSTEM_PROMPT = (
-    "Ты — VK AI Manager, русскоязычный "
-    "контент-менеджер сообщества ВКонтакте. "
-    "Помогай создавать посты, заголовки, CTA, "
-    "рубрики, контент-планы и идеи визуалов. "
-    "Пиши естественно и без лишней воды. "
-    "Не выдумывай факты о пользователе или бизнесе. "
-    "Если информации мало, делай нейтральный вариант. "
-    "Ничего не публикуй без явного подтверждения пользователя."
-)
+SYSTEM_PROMPT = """
+Ты — VK AI Manager, личный AI-контент-менеджер пользователя.
+
+Твоя главная цель — помогать развивать личную страницу ВКонтакте:
+увеличивать охваты, вовлечённость, узнаваемость и рост аудитории
+органическими способами.
+
+Ты не просто отвечаешь на запросы.
+Ты работаешь как инициативный контент-менеджер.
+
+Ты должен:
+
+— предлагать, что публиковать дальше;
+— строить недельные и месячные контент-планы;
+— чередовать личные, вовлекающие, полезные, эмоциональные и имиджевые публикации;
+— придумывать сильные первые строки;
+— использовать CTA только когда он действительно нужен;
+— не перегружать посты хэштегами;
+— анализировать фотографии как материал для контента;
+— если прислано несколько фото, сравнивать их и выбирать самые сильные;
+— объяснять, почему выбран конкретный сюжет;
+— учитывать статистику прошлых публикаций, если пользователь её присылает;
+— улучшать дальнейший контент на основе результатов;
+— не обещать гарантированный рост или вирусность;
+— не использовать спам, накрутку и сомнительные методы.
+
+Пиши по-русски, естественно, понятно и без лишней воды.
+
+Не задавай пользователю длинную анкету из множества вопросов.
+Если информации мало, сделай разумный рабочий вариант.
+Если вопрос действительно необходим — задай максимум один короткий вопрос.
+
+Для готового поста по умолчанию дай:
+
+1. сильную первую строку или короткий заголовок;
+2. сам текст;
+3. мягкий призыв к действию, если он уместен;
+4. от 0 до 5 действительно уместных хэштегов;
+5. одну короткую строку:
+   "Зачем этот пост:" — с целью публикации.
+
+Не выдумывай факты о пользователе, его семье, работе,
+месте проживания или событиях на фотографии.
+
+Если чего-то не видно или не известно —
+не утверждай это как факт.
+
+Ничего не публикуй автоматически.
+Финальное решение всегда принимает пользователь.
+""".strip()
 
 
 PHOTO_GROUPS: dict[str, dict[str, Any]] = {}
 
 
 def is_allowed(update: Update) -> bool:
+
     if not ADMIN_TELEGRAM_ID:
         return True
 
@@ -154,6 +184,7 @@ def is_allowed(update: Update) -> bool:
 
 
 async def guard(update: Update) -> bool:
+
     if is_allowed(update):
         return True
 
@@ -165,32 +196,8 @@ async def guard(update: Update) -> bool:
     return False
 
 
-def publish_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✅ Опубликовать в VK",
-                    callback_data="publish_draft",
-                ),
-                InlineKeyboardButton(
-                    "❌ Отмена",
-                    callback_data="cancel_draft",
-                ),
-            ]
-        ]
-    )
-
-
 def ai_ready() -> bool:
     return bool(OPENROUTER_API_KEY)
-
-
-def vk_ready() -> bool:
-    return bool(
-        VK_ACCESS_TOKEN
-        and VK_GROUP_ID
-    )
 
 
 async def ai_text(
@@ -219,7 +226,9 @@ async def telegram_photo_data_url(
     file_id: str,
 ) -> str:
 
-    tg_file = await context.bot.get_file(file_id)
+    tg_file = await context.bot.get_file(
+        file_id
+    )
 
     raw = await tg_file.download_as_bytearray()
 
@@ -243,16 +252,21 @@ async def ai_post_from_photos(
         {
             "type": "input_text",
             "text": (
-                "Изучи фотографии и создай "
-                "ОДИН готовый пост для ВКонтакте. "
-                "Если фотографий несколько, "
-                "выбери самые сильные и учти общий сюжет. "
-                "Пост должен быть готов к публикации: "
-                "сильное начало, основной текст, "
-                "мягкий CTA и только уместные хэштеги. "
-                "Не пиши служебный анализ. "
+                "Ты получил фотографии для личной страницы ВКонтакте. "
+                "Оцени их как профессиональный контент-менеджер. "
+                "Если фотографий несколько, выбери самые сильные "
+                "и определи лучший порядок. "
+                "Затем создай ОДИН готовый пост, "
+                "который помогает развитию страницы. "
+                "Не пиши длинный технический разбор. "
+                "После поста добавь очень коротко: "
+                "'Лучшие фото: ...' и 'Почему: ...'. "
+                "Не придумывай детали, которых не видно. "
                 "Комментарий пользователя: "
-                + (user_caption or "нет")
+                + (
+                    user_caption
+                    or "нет"
+                )
             ),
         }
     ]
@@ -287,163 +301,6 @@ async def ai_post_from_photos(
     ).strip()
 
 
-async def vk_api(
-    method: str,
-    params: dict[str, Any] | None = None,
-) -> Any:
-
-    if not vk_ready():
-        raise RuntimeError(
-            "VK is not configured"
-        )
-
-    payload = dict(
-        params or {}
-    )
-
-    payload["access_token"] = (
-        VK_ACCESS_TOKEN
-    )
-
-    payload["v"] = VK_API_VERSION
-
-    async with httpx.AsyncClient(
-        timeout=30.0
-    ) as client:
-
-        response = await client.post(
-            "https://api.vk.com/method/"
-            + method,
-            data=payload,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-    if "error" in data:
-
-        error = data["error"]
-
-        raise RuntimeError(
-            "VK API error "
-            + str(error.get("error_code"))
-            + ": "
-            + str(error.get("error_msg"))
-        )
-
-    return data.get("response")
-
-
-async def upload_photo_to_vk(
-    context: ContextTypes.DEFAULT_TYPE,
-    file_id: str,
-) -> str:
-
-    group_id = abs(
-        int(VK_GROUP_ID)
-    )
-
-    upload = await vk_api(
-        "photos.getWallUploadServer",
-        {
-            "group_id": group_id,
-        },
-    )
-
-    upload_url = upload[
-        "upload_url"
-    ]
-
-    tg_file = await context.bot.get_file(
-        file_id
-    )
-
-    raw = bytes(
-        await tg_file.download_as_bytearray()
-    )
-
-    async with httpx.AsyncClient(
-        timeout=60.0
-    ) as client:
-
-        response = await client.post(
-            upload_url,
-            files={
-                "photo": (
-                    "telegram.jpg",
-                    raw,
-                    "image/jpeg",
-                )
-            },
-        )
-
-        response.raise_for_status()
-
-        uploaded = response.json()
-
-    saved = await vk_api(
-        "photos.saveWallPhoto",
-        {
-            "group_id": group_id,
-            "server": uploaded["server"],
-            "photo": uploaded["photo"],
-            "hash": uploaded["hash"],
-        },
-    )
-
-    photo = saved[0]
-
-    return (
-        "photo"
-        + str(photo["owner_id"])
-        + "_"
-        + str(photo["id"])
-    )
-
-
-async def publish_to_vk(
-    context: ContextTypes.DEFAULT_TYPE,
-    text: str,
-    file_ids: list[str] | None = None,
-) -> Any:
-
-    attachments: list[str] = []
-
-    for file_id in (
-        file_ids or []
-    )[:10]:
-
-        attachment = (
-            await upload_photo_to_vk(
-                context,
-                file_id,
-            )
-        )
-
-        attachments.append(
-            attachment
-        )
-
-    params: dict[str, Any] = {
-        "owner_id": -abs(
-            int(VK_GROUP_ID)
-        ),
-        "from_group": 1,
-        "message": text,
-    }
-
-    if attachments:
-        params["attachments"] = (
-            ",".join(attachments)
-        )
-
-    return await vk_api(
-        "wall.post",
-        params,
-    )
-
-
 def save_draft(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
@@ -458,6 +315,24 @@ def save_draft(
         "draft_photo_ids"
     ] = list(
         file_ids or []
+    )
+
+
+def draft_keyboard() -> InlineKeyboardMarkup:
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Оставить как готовый",
+                    callback_data="keep_draft",
+                ),
+                InlineKeyboardButton(
+                    "🔄 Переделать",
+                    callback_data="rewrite_draft",
+                ),
+            ]
+        ]
     )
 
 
@@ -482,6 +357,7 @@ async def start(
     if pool is not None:
 
         try:
+
             await db.upsert_user(
                 pool,
                 user.id,
@@ -490,16 +366,18 @@ async def start(
             )
 
         except Exception:
+
             logger.exception(
                 "Could not save Telegram user"
             )
 
     await message.reply_text(
         "Привет! Я VK AI Manager.\n\n"
-        "Я могу готовить посты, "
-        "контент-планы, анализировать "
-        "фотографии и публиковать "
-        "одобренные тобой материалы в VK.",
+        "Моя задача — помогать развивать "
+        "твою личную страницу VK: "
+        "планировать контент, выбирать "
+        "сильные фотографии, готовить посты "
+        "и предлагать следующий шаг.",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -557,9 +435,11 @@ async def ping(
     )
 
     if client is None:
+
         await message.reply_text(
             "pong"
         )
+
         return
 
     try:
@@ -569,15 +449,19 @@ async def ping(
         )
 
         if cached:
+
             await message.reply_text(
                 "pong (cached)"
             )
+
         else:
+
             await message.reply_text(
                 "pong (fresh)"
             )
 
     except Exception:
+
         await message.reply_text(
             "pong"
         )
@@ -602,12 +486,6 @@ async def status_command(
         else "❌"
     )
 
-    vk = (
-        "✅"
-        if vk_ready()
-        else "❌"
-    )
-
     lock = (
         "✅"
         if ADMIN_TELEGRAM_ID
@@ -617,11 +495,59 @@ async def status_command(
     await message.reply_text(
         "ИИ OpenRouter: "
         + ai
-        + "\nVK: "
-        + vk
         + "\nЗакрытый доступ: "
         + lock
+        + "\n\n"
+        "Публикация на личную страницу VK "
+        "пока остаётся с твоим подтверждением."
     )
+
+
+async def strategy_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if not await guard(update):
+        return
+
+    message = update.effective_message
+
+    if message is None:
+        return
+
+    await message.reply_text(
+        "Готовлю стратегию роста…"
+    )
+
+    try:
+
+        result = await ai_text(
+            "Составь практичную стратегию "
+            "развития личной страницы ВКонтакте "
+            "на ближайшие 30 дней. "
+            "Исходи из того, что это личная страница, "
+            "а не коммерческое сообщество. "
+            "Дай: позиционирование, 4–6 рубрик, "
+            "частоту публикаций, баланс форматов, "
+            "идеи вовлечения, что отслеживать "
+            "по результатам и план первых 7 дней. "
+            "Не обещай гарантированный рост."
+        )
+
+        await message.reply_text(
+            result
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Strategy generation failed"
+        )
+
+        await message.reply_text(
+            "Не получилось составить стратегию."
+        )
 
 
 async def plan_command(
@@ -641,25 +567,96 @@ async def plan_command(
         context.args
     ).strip()
 
-    prompt = (
-        "Составь контент-план "
-        "для сообщества ВКонтакте "
-        "на 7 дней: по 2 поста в день. "
-        "Для каждого поста укажи тему, "
-        "цель, короткий хук, "
-        "идею визуала и CTA. "
-        "Сбалансируй вовлечение, "
-        "пользу, доверие и продажи. "
-        "Тематика пользователя: "
-        + (
-            topic
-            or "не указана"
-        )
+    await message.reply_text(
+        "Составляю план на неделю…"
     )
 
-    await message.reply_text(
-        "Составляю план…"
+    try:
+
+        result = await ai_text(
+            "Составь контент-план "
+            "для личной страницы ВКонтакте "
+            "на 7 дней. "
+            "Не делай одинаковые посты. "
+            "Чередуй личный контент, вовлечение, "
+            "полезный материал, эмоциональные истории "
+            "и лёгкие форматы. "
+            "Для каждого дня укажи: "
+            "тему, цель, идею фото или видео, "
+            "первую строку и CTA. "
+            "Если уместно, предложи 1–2 дня "
+            "без публикации. "
+            "Дополнительная тема пользователя: "
+            + (
+                topic
+                or "не указана"
+            )
+        )
+
+        context.user_data[
+            "last_plan"
+        ] = result
+
+        await message.reply_text(
+            result
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Content plan generation failed"
+        )
+
+        await message.reply_text(
+            "Не получилось составить план."
+        )
+
+
+async def next_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if not await guard(update):
+        return
+
+    message = update.effective_message
+
+    if message is None:
+        return
+
+    last_plan = context.user_data.get(
+        "last_plan",
+        "",
     )
+
+    last_draft = context.user_data.get(
+        "draft_text",
+        "",
+    )
+
+    prompt = (
+        "Скажи, что лучше опубликовать "
+        "следующим на личной странице VK. "
+        "Дай один конкретный вариант: "
+        "цель, сюжет, какой визуал нужен "
+        "и короткий пример первой строки. "
+        "Не давай десять вариантов."
+    )
+
+    if last_plan:
+
+        prompt += (
+            "\nПоследний план:\n"
+            + last_plan[:4000]
+        )
+
+    if last_draft:
+
+        prompt += (
+            "\nПоследний подготовленный пост:\n"
+            + last_draft[:2000]
+        )
 
     try:
 
@@ -674,11 +671,11 @@ async def plan_command(
     except Exception:
 
         logger.exception(
-            "Content plan generation failed"
+            "Next post recommendation failed"
         )
 
         await message.reply_text(
-            "Не получилось составить план."
+            "Не получилось выбрать следующий пост."
         )
 
 
@@ -704,7 +701,7 @@ async def post_command(
         await message.reply_text(
             "Напиши тему после команды.\n\n"
             "Например:\n"
-            "/post осенняя прогулка с ребёнком"
+            "/post семейная прогулка осенью"
         )
 
         return
@@ -716,13 +713,14 @@ async def post_command(
     try:
 
         text = await ai_text(
-            "Создай один полностью готовый "
-            "пост для ВКонтакте. "
-            "Нужны сильное начало, "
-            "основной текст, CTA "
-            "и только уместные хэштеги. "
-            "Тема: "
+            "Создай один готовый пост "
+            "для личной страницы ВКонтакте "
+            "на тему: "
             + topic
+            + ". Цель — не просто написать красиво, "
+            "а сделать публикацию интересной "
+            "для аудитории и полезной "
+            "для развития страницы."
         )
 
         save_draft(
@@ -732,7 +730,7 @@ async def post_command(
 
         await message.reply_text(
             text,
-            reply_markup=publish_keyboard(),
+            reply_markup=draft_keyboard(),
         )
 
     except Exception:
@@ -746,40 +744,7 @@ async def post_command(
         )
 
 
-async def publish_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-
-    if message is None:
-        return
-
-    text = context.user_data.get(
-        "draft_text"
-    )
-
-    if not text:
-
-        await message.reply_text(
-            "Сначала создай черновик "
-            "через /post или отправь фото."
-        )
-
-        return
-
-    await message.reply_text(
-        "Опубликовать последний "
-        "черновик в VK?",
-        reply_markup=publish_keyboard(),
-    )
-
-
-async def publish_callback(
+async def draft_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
@@ -794,203 +759,70 @@ async def publish_callback(
 
     await query.answer()
 
-    if query.data == "cancel_draft":
+    if query.data == "keep_draft":
 
         await query.edit_message_reply_markup(
             reply_markup=None
         )
 
         await query.message.reply_text(
-            "Публикация отменена."
+            "✅ Оставила как готовый черновик. "
+            "Можешь скопировать его в VK "
+            "или попросить меня подготовить следующий."
         )
 
         return
 
-    if query.data != "publish_draft":
-        return
+    if query.data == "rewrite_draft":
 
-    if not vk_ready():
+        old_text = context.user_data.get(
+            "draft_text",
+            "",
+        )
+
+        await query.edit_message_reply_markup(
+            reply_markup=None
+        )
 
         await query.message.reply_text(
-            "VK ещё не подключён.\n\n"
-            "Нужно добавить в Railway:\n"
-            "VK_ACCESS_TOKEN\n"
-            "VK_GROUP_ID"
+            "Переделываю…"
         )
 
-        return
+        try:
 
-    text = context.user_data.get(
-        "draft_text"
-    )
-
-    file_ids = context.user_data.get(
-        "draft_photo_ids",
-        [],
-    )
-
-    if not text:
-
-        await query.message.reply_text(
-            "Черновик не найден."
-        )
-
-        return
-
-    await query.edit_message_reply_markup(
-        reply_markup=None
-    )
-
-    await query.message.reply_text(
-        "Публикую в VK…"
-    )
-
-    try:
-
-        result = await publish_to_vk(
-            context,
-            text,
-            file_ids,
-        )
-
-        if isinstance(
-            result,
-            dict,
-        ):
-            post_id = result.get(
-                "post_id"
+            new_text = await ai_text(
+                "Переделай этот пост "
+                "для личной страницы VK. "
+                "Сделай естественнее, "
+                "сильнее первую строку "
+                "и убери шаблонность. "
+                "Смысл сохрани.\n\n"
+                + old_text
             )
-        else:
-            post_id = result
 
-        await query.message.reply_text(
-            "✅ Опубликовано в VK.\n"
-            "Post ID: "
-            + str(post_id)
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "VK publish failed"
-        )
-
-        await query.message.reply_text(
-            "Не удалось опубликовать в VK:\n"
-            + str(exc)
-        )
-
-
-async def stats_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await guard(update):
-        return
-
-    message = update.effective_message
-
-    if message is None:
-        return
-
-    if not vk_ready():
-
-        await message.reply_text(
-            "Сначала подключим VK."
-        )
-
-        return
-
-    await message.reply_text(
-        "Смотрю статистику "
-        "последних постов…"
-    )
-
-    try:
-
-        data = await vk_api(
-            "wall.get",
-            {
-                "owner_id": -abs(
-                    int(VK_GROUP_ID)
+            save_draft(
+                context,
+                new_text,
+                context.user_data.get(
+                    "draft_photo_ids",
+                    [],
                 ),
-                "count": 20,
-            },
-        )
-
-        rows = []
-
-        for item in data.get(
-            "items",
-            [],
-        ):
-
-            rows.append(
-                {
-                    "id": item.get("id"),
-                    "text": (
-                        item.get("text")
-                        or ""
-                    )[:500],
-                    "likes": item.get(
-                        "likes",
-                        {},
-                    ).get(
-                        "count",
-                        0,
-                    ),
-                    "comments": item.get(
-                        "comments",
-                        {},
-                    ).get(
-                        "count",
-                        0,
-                    ),
-                    "reposts": item.get(
-                        "reposts",
-                        {},
-                    ).get(
-                        "count",
-                        0,
-                    ),
-                    "views": item.get(
-                        "views",
-                        {},
-                    ).get(
-                        "count",
-                        0,
-                    ),
-                }
             )
 
-        analysis = await ai_text(
-            "Проанализируй статистику "
-            "последних постов VK. "
-            "Назови 3 сильные стороны, "
-            "3 точки роста и предложи "
-            "темы следующих 6 постов. "
-            "Не придумывай отсутствующие "
-            "метрики.\n\n"
-            "Данные: "
-            + str(rows)
-        )
+            await query.message.reply_text(
+                new_text,
+                reply_markup=draft_keyboard(),
+            )
 
-        await message.reply_text(
-            analysis
-        )
+        except Exception:
 
-    except Exception as exc:
+            logger.exception(
+                "Draft rewrite failed"
+            )
 
-        logger.exception(
-            "VK stats failed"
-        )
-
-        await message.reply_text(
-            "Не получилось получить "
-            "статистику VK:\n"
-            + str(exc)
-        )
+            await query.message.reply_text(
+                "Не получилось переделать пост."
+            )
 
 
 async def text_message(
@@ -1065,8 +897,11 @@ async def process_album_after_delay(
 
         await message.reply_text(
             "Получила фотографий: "
-            + str(len(file_ids))
-            + ". Готовлю пост…"
+            + str(
+                len(file_ids)
+            )
+            + ". Выбираю лучшие "
+            "и готовлю пост…"
         )
 
         text = await ai_post_from_photos(
@@ -1083,10 +918,11 @@ async def process_album_after_delay(
 
         await message.reply_text(
             text,
-            reply_markup=publish_keyboard(),
+            reply_markup=draft_keyboard(),
         )
 
     except asyncio.CancelledError:
+
         return
 
     except Exception:
@@ -1143,6 +979,7 @@ async def photo_message(
         group["message"] = message
 
         if caption:
+
             group["caption"] = caption
 
         old_task = group.get(
@@ -1153,6 +990,7 @@ async def photo_message(
             old_task
             and not old_task.done()
         ):
+
             old_task.cancel()
 
         group["task"] = (
@@ -1168,6 +1006,7 @@ async def photo_message(
 
     await message.reply_text(
         "Анализирую фото "
+        "как контент-менеджер "
         "и готовлю пост…"
     )
 
@@ -1187,7 +1026,7 @@ async def photo_message(
 
         await message.reply_text(
             text,
-            reply_markup=publish_keyboard(),
+            reply_markup=draft_keyboard(),
         )
 
     except Exception:
@@ -1219,23 +1058,23 @@ async def menu_button(
 
     text = message.text.strip()
 
-    if text == MENU_HELP:
-
-        await help_command(
-            update,
-            context,
-        )
-
-    elif text == MENU_PLAN:
+    if text == MENU_PLAN:
 
         await plan_command(
             update,
             context,
         )
 
-    elif text == MENU_STATUS:
+    elif text == MENU_NEXT:
 
-        await status_command(
+        await next_command(
+            update,
+            context,
+        )
+
+    elif text == MENU_STRATEGY:
+
+        await strategy_command(
             update,
             context,
         )
@@ -1337,8 +1176,22 @@ def register_handlers(
 
     application.add_handler(
         CommandHandler(
+            "strategy",
+            strategy_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
             "plan",
             plan_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "next",
+            next_command,
         )
     )
 
@@ -1350,25 +1203,9 @@ def register_handlers(
     )
 
     application.add_handler(
-        CommandHandler(
-            "publish",
-            publish_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "stats",
-            stats_command,
-        )
-    )
-
-    application.add_handler(
         CallbackQueryHandler(
-            publish_callback,
-            pattern=(
-                "^(publish_draft|cancel_draft)$"
-            ),
+            draft_callback,
+            pattern="^(keep_draft|rewrite_draft)$",
         )
     )
 
@@ -1376,11 +1213,11 @@ def register_handlers(
         MessageHandler(
             filters.Regex(
                 "^("
-                + MENU_HELP
-                + "|"
                 + MENU_PLAN
                 + "|"
-                + MENU_STATUS
+                + MENU_NEXT
+                + "|"
+                + MENU_STRATEGY
                 + ")$"
             ),
             menu_button,
