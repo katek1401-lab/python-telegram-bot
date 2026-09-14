@@ -376,24 +376,123 @@ async def polish_media_result(text: str, confirmed_city: Optional[str]) -> str:
         return text
 
 
-def media_review_keyboard():
+def media_fact_warnings(text: str):
+    """Детерминированная проверка опасных утверждений перед кнопкой «Готово»."""
+    t = (text or "").lower().replace("ё", "е")
+    warnings = []
+
+    blocked = {
+        "неподтвержденное родство": ["сын", "дочь", "мама с", "папа с"],
+        "неподтвержденная история публикаций": [
+            "второй подобный", "второй семейный", "подряд", "странице не хватает",
+            "недавний контент", "последние публикации", "уже публиковали", "уже был",
+        ],
+        "неподтвержденный прогноз результата": [
+            "утонет", "пройдет незамеч", "соберет реакции", "собирает реакции",
+            "удержит аудиторию", "удерживает аудиторию", "даст охваты",
+            "остановит скролл", "требует зацепа", "понравится алгоритм",
+        ],
+    }
+
+    for label, phrases in blocked.items():
+        if any(phrase in t for phrase in phrases):
+            warnings.append(label)
+
+    # Ловим явное противоречие в монтаже: «оставить как есть» и одновременно резать ролик.
+    if "оставить как есть" in t and any(x in t for x in ["убрать первые", "укоротить начало", "укоротить конец", "оставить только"]):
+        warnings.append("противоречие в совете по монтажу")
+
+    return warnings
+
+
+async def fact_safe_media_result(text: str, confirmed_city: Optional[str]) -> tuple[str, list]:
+    """До двух раз просит модель убрать только найденные риски, затем снова проверяет кодом."""
+    result = remove_unconfirmed_city_hashtags(text, confirmed_city)
+
+    for _ in range(2):
+        warnings = media_fact_warnings(result)
+        if not warnings:
+            return result, []
+
+        warning_text = ", ".join(warnings)
+        city_rule = (
+            f"Подтвержденный текущий город пользователя: {confirmed_city}. Не утверждай, что материал снят там, если это не видно и пользователь этого не сказал."
+            if confirmed_city
+            else "Город съемки не подтвержден. Не называй город и не добавляй географические хэштеги."
+        )
+
+        prompt = f"""
+Ты финальный редактор фактов. Исправь текст так, чтобы в нем НЕ осталось следующих рисков:
+{warning_text}.
+
+ЖЕСТКИЕ ПРАВИЛА:
+— не добавляй новых фактов;
+— не называй ребенка сыном или дочерью без прямого сообщения пользователя;
+— не утверждай, что это второй похожий пост, что чего-то «не хватает странице» или что такой контент уже публиковался: истории реальных публикаций у тебя нет;
+— не предсказывай охваты, реакции, удержание, алгоритмы, «утонет в ленте», «пройдет незамеченным» и подобное;
+— если совет по монтажу «оставить как есть», не предлагай в том же ответе что-то вырезать. Выбери одно решение;
+— идеи для будущей съемки помечай именно как предложения, а не как существующие факты;
+— {city_rule}
+— сохрани решение ПУБЛИКОВАТЬ / ДОРАБОТАТЬ / НЕ ПУБЛИКОВАТЬ;
+— сохрани структуру и нормальный разговорный русский язык.
+
+Текст:
+{result}
+"""
+        try:
+            rewritten = await ai_text_once(prompt, TEXT_FALLBACK_MODEL)
+            if rewritten:
+                result = remove_unconfirmed_city_hashtags(rewritten, confirmed_city)
+        except Exception:
+            logger.exception("Fact safety rewrite failed")
+            break
+
+    return result, media_fact_warnings(result)
+
+
+def media_review_keyboard(ready_allowed: bool = True):
+    if ready_allowed:
+        return InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("✅ Готово к публикации", callback_data="media_ready"),
+                InlineKeyboardButton("🔄 Переделать", callback_data="media_redo"),
+            ]]
+        )
+
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("✅ Готово к публикации", callback_data="media_ready"),
-            InlineKeyboardButton("🔄 Переделать", callback_data="media_redo"),
-        ]]
+        [[InlineKeyboardButton("🔄 Переделать и проверить", callback_data="media_redo")]]
     )
 
 
 async def send_media_result(message, context: ContextTypes.DEFAULT_TYPE, result: str):
+    city = None
+    try:
+        user = message.chat.id if message and message.chat else None
+        if user:
+            city = await get_current_city(context, user)
+    except Exception:
+        logger.exception("Could not load city for media safety check")
+
+    result = await polish_media_result(result, city)
+    result, warnings = await fact_safe_media_result(result, city)
+
     save_draft(context, result)
-    # Анализ обычно помещается в одно сообщение. Если модель всё же ответила слишком длинно,
-    # сначала отправляем текст частями, а кнопки — отдельным сообщением.
+    context.user_data["media_ready_allowed"] = not warnings
+    context.user_data["media_fact_warnings"] = warnings
+
+    keyboard = media_review_keyboard(ready_allowed=not warnings)
+
     if len(result) <= 3900:
-        await message.reply_text(result, reply_markup=media_review_keyboard())
+        await message.reply_text(result, reply_markup=keyboard)
     else:
         await send_long_text(message, result)
-        await message.reply_text("Что делаем с этим вариантом?", reply_markup=media_review_keyboard())
+        if warnings:
+            await message.reply_text(
+                "⚠️ Проверка фактов ещё видит риск. Готовность пока заблокирована.",
+                reply_markup=keyboard,
+            )
+        else:
+            await message.reply_text("Что делаем с этим вариантом?", reply_markup=keyboard)
 
 
 async def media_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -412,6 +511,15 @@ async def media_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text("Черновик уже потерялся. Пришли фото или видео ещё раз.")
             return
 
+        # Не доверяем одной только кнопке: проверяем черновик кодом повторно.
+        warnings = media_fact_warnings(draft)
+        if warnings or not context.user_data.get("media_ready_allowed", False):
+            await query.message.reply_text(
+                "⚠️ Я ещё вижу риск выдуманного факта или противоречия. "
+                "Готовность не подтверждаю — нажми «Переделать и проверить»."
+            )
+            return
+
         context.user_data["approved_draft"] = draft
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(
@@ -426,28 +534,29 @@ async def media_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text("Черновик уже потерялся. Пришли фото или видео ещё раз.")
             return
 
-        wait = await query.message.reply_text("Переделываю текст и проверяю русский…")
+        wait = await query.message.reply_text("Переделываю и проверяю факты…")
         prompt = f"""
 Ты — строгий редактор фактов. Переделай исходный разбор, НЕ ДОБАВЛЯЯ НИ ОДНОГО нового факта.
 
 КРИТИЧЕСКИЕ ПРАВИЛА:
-— используй только сведения, которые уже прямо содержатся в исходном разборе как видимые детали;
-— пол, родство и роль человека неизвестны, если пользователь их явно не сообщал: пиши «ребёнок», а не «сын», «дочь», «малыш автора»;
+— используй только сведения, которые прямо содержатся в исходном разборе как видимые детали;
+— пол и родство человека неизвестны, если пользователь их явно не сообщал: пиши «ребёнок», а не «сын» или «дочь»;
 — не придумывай мысли, чувства, намерения, причины действий, реплики или отношения между людьми;
-— не превращай предположение в факт: вместо «помогает» описывай видимое действие, например «несёт» или «тащит»;
-— не придумывай новые предметы и кадры: никакого кофе, ботинок, рук автора, взгляда, лица, забора и т.п., если этого нет в исходных видимых деталях;
-— не пиши текст от первого лица пользователя с мыслями или событиями, которых пользователь не сообщал;
-— не называй место съёмки и город, если они не подтверждены самим пользователем;
-— не обещай, что материал «утонет», даст охваты, соберёт реакции, удержит аудиторию или понравится алгоритмам;
-— если для содержательной подписи фактов мало, сделай короткую нейтральную подпись только по видимому;
-— хэштеги необязательны. Лучше без хэштегов, чем выдуманные, странные или слишком общие;
-— рекомендации на следующий кадр формулируй как ИДЕЮ на будущее, а не как будто такой кадр уже существует;
-— нормальный разговорный русский, без канцеляризмов, рекламных формулировок и искусственных слов.
+— не превращай предположение в факт: вместо «помогает» описывай видимое действие;
+— не придумывай новые предметы и существующие кадры;
+— не пиши от первого лица пользователя мысли или события, которых пользователь не сообщал;
+— не называй место съёмки и город, если они не подтверждены;
+— у тебя НЕТ истории реальных публикаций VK: не говори «второй подобный пост», «подряд», «странице не хватает», «мы уже публиковали»;
+— не обещай и не предсказывай охваты, реакции, удержание, алгоритмы, «утонет в ленте» или «пройдёт незамеченным»;
+— не утверждай общие правила VK вроде «такой формат требует зацепа», если у тебя нет статистики страницы;
+— совет по монтажу должен быть ОДИН и непротиворечивый: либо оставить как есть, либо конкретно изменить;
+— если фактов для подписи мало, сделай короткую нейтральную подпись;
+— хэштеги необязательны;
+— новый кадр разрешено предложить только как ИДЕЮ на будущее.
 
 Сохрани исходное решение ПУБЛИКОВАТЬ / ДОРАБОТАТЬ / НЕ ПУБЛИКОВАТЬ.
-Не усиливай и не смягчай решение ради вежливости.
 
-Структура ответа:
+Структура:
 🧭 Решение менеджера
 👀 Что видно
 ⭐ Самое сильное
@@ -457,8 +566,6 @@ async def media_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
 ➡️ Что снять следующим
 💡 Роль в блоге
 
-В разделе «Что снять следующим» разрешено предложить ОДИН новый кадр как будущую съёмку, но явно обозначь это как предложение. Не утверждай, что он уже существует.
-
 Исходный разбор:
 {draft}
 """
@@ -466,9 +573,14 @@ async def media_review_callback(update: Update, context: ContextTypes.DEFAULT_TY
             result = await ai_text(prompt)
             city = await get_current_city(context, update.effective_user.id)
             result = await polish_media_result(result, city)
+            result, warnings = await fact_safe_media_result(result, city)
             await wait.delete()
             await query.edit_message_reply_markup(reply_markup=None)
             await send_media_result(query.message, context, result)
+            if warnings:
+                await query.message.reply_text(
+                    "⚠️ Проверка всё ещё видит риск выдумки или противоречия, поэтому кнопка «Готово» пока не показана."
+                )
         except Exception:
             logger.exception("Media redo failed")
             await wait.edit_text("Не получилось переделать. Нажми «Переделать» ещё раз чуть позже.")
