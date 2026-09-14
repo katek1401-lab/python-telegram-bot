@@ -8,10 +8,18 @@ from typing import Optional
 
 import av
 from openai import AsyncOpenAI
-from telegram import BotCommand, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackContext,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -279,6 +287,166 @@ async def rewrite_to_clean_russian(text: str) -> str:
     except Exception:
         logger.exception("Russian cleanup failed")
         return text
+
+
+BAD_RUSSIAN_PATTERNS = [
+    "уборочная инфраструктура",
+    "визуальная единица",
+    "контентная сущность",
+    "формирование доверительных отношений",
+    "теплоёмкий акцент",
+    "маленькие чудеса",
+    "бытовойжизнь",
+    "живоеблог",
+    "матьи",
+]
+
+
+def has_bad_russian(text: str) -> bool:
+    if not text:
+        return False
+    t = text.lower().replace("ё", "е")
+    return any(pattern.replace("ё", "е") in t for pattern in BAD_RUSSIAN_PATTERNS)
+
+
+def remove_unconfirmed_city_hashtags(text: str, confirmed_city: Optional[str]) -> str:
+    """Не разрешаем модели ставить географический хэштег без подтверждённого города."""
+    if not text:
+        return text
+
+    allowed = set()
+    if confirmed_city == "Мурманск":
+        allowed.add("мурманск")
+    elif confirmed_city == "Нижний Новгород":
+        allowed.update({"нижнийновгород", "нижний_новгород"})
+
+    def replace_tag(match):
+        tag = match.group(1)
+        normalized = tag.lower().replace("ё", "е")
+        city_tags = {"мурманск", "нижнийновгород", "нижний_новгород"}
+        if normalized in city_tags and normalized not in allowed:
+            return ""
+        return match.group(0)
+
+    cleaned = re.sub(r"#([A-Za-zА-Яа-яЁё_]+)", replace_tag, text)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+async def polish_media_result(text: str, confirmed_city: Optional[str]) -> str:
+    """Финальная редакторская проверка анализа фото/видео перед показом пользователю."""
+    text = remove_unconfirmed_city_hashtags(text, confirmed_city)
+
+    needs_rewrite = has_suspicious_latin(text) or has_bad_russian(text)
+    if not needs_rewrite:
+        return text
+
+    city_rule = (
+        f"Единственный подтверждённый текущий город пользователя — {confirmed_city}. "
+        "Не добавляй другой город и не делай вывод, что материал снят в этом городе, если это не видно."
+        if confirmed_city
+        else "Город съёмки не подтверждён. Не называй Мурманск, Нижний Новгород или другой город и не ставь географические хэштеги."
+    )
+
+    prompt = f"""
+Ты финальный редактор ответа контент-менеджера.
+Исправь ТОЛЬКО качество текста, не меняя решение менеджера и не добавляя фактов.
+
+Обязательно:
+— нормальный живой русский язык без грамматических ошибок и поломанных слов;
+— никаких канцеляризмов и искусственных выражений;
+— никаких выдуманных мыслей, намерений и эмоций людей в кадре;
+— не называй ребёнка «помощником» и не приписывай ему желание помогать, если это не подтверждено;
+— убери странные, бессмысленные и натянутые хэштеги; лучше 0–3 хэштега или вообще без них;
+— {city_rule}
+— сохрани исходные заголовки и общую структуру;
+— не обещай охваты, вовлечение или реакцию аудитории.
+
+Текст для исправления:
+{text}
+"""
+
+    try:
+        rewritten = await ai_text_once(prompt, TEXT_FALLBACK_MODEL)
+        rewritten = remove_unconfirmed_city_hashtags(rewritten, confirmed_city)
+        return rewritten or text
+    except Exception:
+        logger.exception("Media polish failed")
+        return text
+
+
+def media_review_keyboard():
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("✅ Готово к публикации", callback_data="media_ready"),
+            InlineKeyboardButton("🔄 Переделать", callback_data="media_redo"),
+        ]]
+    )
+
+
+async def send_media_result(message, context: ContextTypes.DEFAULT_TYPE, result: str):
+    save_draft(context, result)
+    # Анализ обычно помещается в одно сообщение. Если модель всё же ответила слишком длинно,
+    # сначала отправляем текст частями, а кнопки — отдельным сообщением.
+    if len(result) <= 3900:
+        await message.reply_text(result, reply_markup=media_review_keyboard())
+    else:
+        await send_long_text(message, result)
+        await message.reply_text("Что делаем с этим вариантом?", reply_markup=media_review_keyboard())
+
+
+async def media_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not user_allowed(update):
+        return
+
+    query = update.callback_query
+    if not query:
+        return
+
+    await query.answer()
+
+    if query.data == "media_ready":
+        draft = context.user_data.get("last_draft")
+        if not draft:
+            await query.message.reply_text("Черновик уже потерялся. Пришли фото или видео ещё раз.")
+            return
+
+        context.user_data["approved_draft"] = draft
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "✅ Зафиксировала этот вариант как готовый.\n\n"
+            "В VK я пока ничего не публикую. Следующим шагом подключим отдельное подтверждение «Публикуем?»."
+        )
+        return
+
+    if query.data == "media_redo":
+        draft = context.user_data.get("last_draft")
+        if not draft:
+            await query.message.reply_text("Черновик уже потерялся. Пришли фото или видео ещё раз.")
+            return
+
+        wait = await query.message.reply_text("Переделываю текст и проверяю русский…")
+        prompt = f"""
+Переделай этот разбор как строгий, но живой контент-менеджер VK.
+Не добавляй новых фактов и не меняй факты о том, что видно.
+Убери канцеляризмы, банальности, странные хэштеги и грамматические ошибки.
+Сохрани решение ПУБЛИКОВАТЬ / ДОРАБОТАТЬ / НЕ ПУБЛИКОВАТЬ, если в исходнике нет явного противоречия.
+Дай один сильный естественный вариант подписи.
+
+Исходный разбор:
+{draft}
+"""
+        try:
+            result = await ai_text(prompt)
+            city = await get_current_city(context, update.effective_user.id)
+            result = await polish_media_result(result, city)
+            await wait.delete()
+            await query.edit_message_reply_markup(reply_markup=None)
+            await send_media_result(query.message, context, result)
+        except Exception:
+            logger.exception("Media redo failed")
+            await wait.edit_text("Не получилось переделать. Нажми «Переделать» ещё раз чуть позже.")
 
 
 def get_pool(context: ContextTypes.DEFAULT_TYPE):
@@ -1047,8 +1215,8 @@ async def analyse_photo_urls(update: Update, context: ContextTypes.DEFAULT_TYPE,
 """
 
     result = await ai_post_from_photos(urls, prompt)
-    save_draft(context, result)
-    await send_long_text(update.message, result)
+    result = await polish_media_result(result, city)
+    await send_media_result(update.message, context, result)
 
 
 async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1256,10 +1424,10 @@ async def video_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
 
         result = await ai_post_from_photos(image_urls, prompt)
-        save_draft(context, result)
+        result = await polish_media_result(result, city)
 
         await wait.delete()
-        await send_long_text(message, result)
+        await send_media_result(message, context, result)
 
     except ValueError as exc:
         if str(exc) == "VIDEO_TOO_LARGE":
@@ -1359,6 +1527,7 @@ async def error_handler(update: object, context: CallbackContext):
 
 
 def register_handlers(application: Application):
+    application.add_handler(CallbackQueryHandler(media_review_callback, pattern=r"^media_(ready|redo)$"))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("post", post_command))
