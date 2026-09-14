@@ -210,15 +210,33 @@ async def ai_text(
             "OPENROUTER_API_KEY is not configured"
         )
 
-    response = await openai_client.responses.create(
+    response = await openai_client.chat.completions.create(
         model=model or TEXT_MODEL,
-        instructions=SYSTEM_PROMPT,
-        input=prompt,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
     )
 
-    return (
-        response.output_text or ""
-    ).strip()
+    if not response.choices:
+        raise RuntimeError(
+            "OpenRouter returned no choices"
+        )
+
+    text = response.choices[0].message.content or ""
+
+    if not text.strip():
+        raise RuntimeError(
+            "OpenRouter returned an empty response"
+        )
+
+    return text.strip()
 
 
 async def telegram_photo_data_url(
